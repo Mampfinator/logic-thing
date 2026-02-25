@@ -1,6 +1,15 @@
-use std::{cmp::Ordering, collections::HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
 use macroquad::{input, prelude::*};
+use petgraph::{
+    Graph,
+    data::DataMap,
+    graph::{DiGraph, NodeIndex},
+    prelude::{StableDiGraph, StableGraph},
+};
 
 pub const TILE_SIZE: f32 = 16.0;
 
@@ -259,19 +268,12 @@ impl GameObject for NetworkId {
     fn render(&self, _: &GameObjectState, simulation: &Simulation, objects: &GameObjects) {
         let network = simulation.networks.get(*self).unwrap();
 
-        let mut targets = Vec::with_capacity(network.pins.len());
-
-        for pin in network.pins.iter() {
-            let pin_state = objects.find_by_meta(pin).unwrap();
-            targets.push(pin_state.position);
-        }
-
         let color = if network.state { RED } else { GREEN };
 
-        for window in targets.windows(2) {
-            let a = window[0];
-            let b = window[1];
-            draw_line(a.x, a.y, b.x, b.y, 5., color);
+        for (a, b) in network.iter_connections() {
+            let pos_a = objects.find_by_meta(&a).unwrap().position;
+            let pos_b = objects.find_by_meta(&b).unwrap().position;
+            draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, 5., color);
         }
     }
 
@@ -1067,6 +1069,12 @@ impl<T> StableVec<T> {
         self.buffer.len()
     }
 
+    pub fn insert_with<F: FnOnce(usize) -> T>(&mut self, f: F) -> usize {
+        let mut slot = self.reserve();
+        slot.set(f(slot.index));
+        slot.index
+    }
+
     pub fn reserve(&mut self) -> Slot<'_, T> {
         let index = self
             .buffer
@@ -1124,17 +1132,65 @@ impl<T> StableVec<T> {
 struct NetworkId(usize);
 
 struct Network {
-    pins: HashSet<PinId>,
+    pins: HashMap<PinId, NodeIndex<usize>>,
+    connections: StableDiGraph<PinId, (), usize>,
     state: bool,
     id: NetworkId,
 }
 
 impl Network {
+    pub fn new(id: NetworkId) -> Self {
+        Self {
+            id,
+            pins: Default::default(),
+            connections: Default::default(),
+            state: false,
+        }
+    }
+
     pub fn update(&mut self, pins: &Pins) {
         self.state = self
-            .pins
-            .iter()
+            .connections
+            .node_weights()
             .any(|p| pins.get_state(*p).unwrap_or(false));
+    }
+
+    fn get_or_insert_node_idx(&mut self, pin: PinId) -> NodeIndex<usize> {
+        if let Some(idx) = self.pins.get(&pin) {
+            *idx
+        } else {
+            let id = self.connections.add_node(pin);
+            self.pins.insert(pin, id);
+            id
+        }
+    }
+
+    pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) {
+        let idx_a = self.get_or_insert_node_idx(pin_a);
+        let idx_b = self.get_or_insert_node_idx(pin_b);
+
+        self.connections.add_edge(idx_a, idx_b, ());
+    }
+
+    pub fn remove(&mut self, pin: PinId) {
+        let Some(idx) = self.pins.get(&pin) else {
+            return;
+        };
+
+        self.connections.remove_node(*idx);
+        self.pins.remove(&pin);
+    }
+
+    pub fn iter_connections(&self) -> impl Iterator<Item = (PinId, PinId)> {
+        self.connections
+            .edge_indices()
+            .filter_map(|index| self.connections.edge_endpoints(index))
+            .map(|(a, b)| {
+                (
+                    self.connections.node_weight(a).copied().unwrap(),
+                    self.connections.node_weight(b).copied().unwrap(),
+                )
+            })
     }
 }
 
@@ -1172,7 +1228,7 @@ impl Networks {
 
     pub fn get_network(&self, pin: PinId) -> Option<NetworkId> {
         for network in self.networks.iter() {
-            if network.pins.contains(&pin) {
+            if network.pins.contains_key(&pin) {
                 return Some(network.id);
             }
         }
@@ -1187,7 +1243,8 @@ impl Networks {
         let mut slot = self.networks.reserve();
         let id = NetworkId(slot.index);
         slot.set(Network {
-            pins: HashSet::default(),
+            pins: HashMap::new(),
+            connections: StableGraph::default(),
             state: false,
             id,
         });
@@ -1216,8 +1273,8 @@ impl Networks {
         let move_from = self.networks.remove(move_from.0).unwrap();
         let move_into = self.networks.get_mut(move_into.0).unwrap();
 
-        for pin in move_from.pins {
-            move_into.pins.insert(pin);
+        for (pin_a, pin_b) in move_from.iter_connections() {
+            move_into.connect(pin_a, pin_b);
         }
     }
 
@@ -1229,25 +1286,24 @@ impl Networks {
             (None, None) => {
                 let mut slot = self.networks.reserve();
                 let id = NetworkId(slot.index);
-                slot.set(Network {
-                    pins: HashSet::from([pin_a, pin_b]),
-                    state: false,
-                    id,
-                });
+
+                let mut network = Network::new(id);
+                network.connect(pin_a, pin_b);
+
+                slot.set(network);
             }
             (Some(a), Some(b)) => self.merge(a, b),
-            (Some(a), None) => self.add_pin(a, pin_b),
-            (None, Some(b)) => self.add_pin(b, pin_a),
+            (Some(a), None) => self.add_pin(a, pin_a, pin_b),
+            (None, Some(b)) => self.add_pin(b, pin_a, pin_b),
         }
     }
 
-    fn add_pin(&mut self, network: NetworkId, pin: PinId) {
+    fn add_pin(&mut self, network: NetworkId, pin_a: PinId, pin_b: PinId) {
         self.networks
             .get_mut(network.0)
             .as_mut()
             .unwrap()
-            .pins
-            .insert(pin);
+            .connect(pin_a, pin_b);
     }
 
     pub fn remove_pin(&mut self, pin: PinId) {
@@ -1256,7 +1312,7 @@ impl Networks {
         };
 
         let network = self.networks.get_mut(network_id.0).unwrap();
-        network.pins.remove(&pin);
+        network.remove(pin);
 
         // if there is only one pin in the network or the network is empty, remove it to free up some processing time.
         if network.pins.len() <= 1 {
