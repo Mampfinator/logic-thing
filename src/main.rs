@@ -1,10 +1,10 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
 use macroquad::{input, prelude::*};
-use petgraph::{
-    graph::NodeIndex,
-    prelude::{StableDiGraph, StableGraph},
-};
+use petgraph::{graph::NodeIndex, prelude::StableUnGraph};
 
 pub const TILE_SIZE: f32 = 16.0;
 
@@ -14,7 +14,7 @@ struct GameObjects {
     state: StableVec<GameObjectState>,
 }
 
-// TODO: custom metadata on GameObjectState.
+// TODO: custom metadata on GameObjectState?
 
 /// (barely) copy type storing object metadata.
 /// The first 64 bits are the index of the object in the internal vector, the next 64 can be arbitrary metadata,
@@ -190,6 +190,7 @@ impl GameObject for ChipId {
         let position = state.position;
 
         draw_rectangle(position.x, position.y, size.x, size.y, DARKGRAY);
+        draw_rectangle_lines(position.x, position.y, size.x, size.y, 1., BLACK);
     }
 
     fn make_oid_meta(&self) -> (usize, u8) {
@@ -227,6 +228,7 @@ impl GameObject for PinId {
         let color = if on_state { RED } else { LIGHTGRAY };
 
         draw_circle(position.x, position.y, TILE_SIZE / 4., color);
+        draw_circle_lines(position.x, position.y, TILE_SIZE / 4., 1., BLACK);
 
         let pin = simulation.pins.get(*self).unwrap();
 
@@ -320,6 +322,11 @@ impl Camera {
             self.zoom_by(-0.1);
         }
 
+        let (_, wheel_y) = input::mouse_wheel();
+        if wheel_y != 0. {
+            self.zoom_by(wheel_y);
+        }
+
         self.camera.zoom = vec2(
             self.zoom_factor / screen_width(),
             self.zoom_factor / screen_height(),
@@ -351,13 +358,16 @@ impl Camera {
 
     fn zoom_by(&mut self, by: f32) {
         self.zoom_factor += by;
+        if self.zoom_factor <= 0. {
+            self.zoom_factor = 0.1;
+        }
     }
 }
 
 #[macroquad::main("Test")]
 async fn main() {
     request_new_screen_size(1080., 720.);
-    set_fullscreen(true);
+    //set_fullscreen(true);
 
     next_frame().await;
 
@@ -373,13 +383,22 @@ async fn main() {
     let nand = simulation.place_chip(Nand::new(3));
     gameobjects.insert(nand, vec2(600., 100.), &simulation);
 
-    for i in 0..6 {
-        simulation.connect(random, Pin::Right(i), nand, Pin::Left(i));
+    for i in 0..3 {
+        simulation.connect(random, Pin::Right(i), random, Pin::Right(i + 1));
+        simulation.connect(nand, Pin::Left(i), nand, Pin::Left(i + 1));
     }
 
-    for network_id in simulation.networks.ids() {
-        gameobjects.insert(network_id, Vec2::ZERO, &simulation);
-    }
+    simulation
+        .connect(random, Pin::Right(0), nand, Pin::Left(0))
+        .unwrap();
+
+    // for i in 0..6 {
+    //     simulation.connect(random, Pin::Right(i), nand, Pin::Left(i));
+    // }
+
+    // for network_id in simulation.networks.ids() {
+    //     gameobjects.insert(network_id, Vec2::ZERO, &simulation);
+    // }
 
     let mut selected_pin: Option<PinId> = None;
 
@@ -397,7 +416,7 @@ async fn main() {
                 && let Ok(pin) = PinId::try_from(object)
             {
                 if let Some(first_pin) = selected_pin {
-                    simulation.networks.connect(first_pin, pin);
+                    simulation.networks.toggle_connect(first_pin, pin);
                     selected_pin = None;
                 } else {
                     selected_pin = Some(pin);
@@ -622,8 +641,8 @@ impl Chip for Nand {
 
     fn update(&mut self, state: &mut PinsState) {
         for i in 0..self.gates {
-            let a = state.read_wire(Pin::Left(2 * i)).unwrap();
-            let b = state.read_wire(Pin::Left(2 * i + 1)).unwrap();
+            let a = state.read_wire(Pin::Left(2 * i)).unwrap_or(false);
+            let b = state.read_wire(Pin::Left(2 * i + 1)).unwrap_or(false);
 
             let value = !(a && b);
 
@@ -677,7 +696,7 @@ impl Simulation {
         let chip_b = self.chips.get(chip_b)?;
         let pin_b = chip_b.get_pinid(pin_b)?;
 
-        self.networks.connect(pin_a, pin_b);
+        self.networks.toggle_connect(pin_a, pin_b);
         Some(())
     }
 
@@ -1140,29 +1159,18 @@ impl<T> StableVec<T> {
 struct NetworkId(usize);
 
 struct Network {
-    pins: HashMap<PinId, NodeIndex<usize>>,
-    connections: StableDiGraph<PinId, (), usize>,
+    pins: NetworkPins,
     state: bool,
     id: NetworkId,
 }
 
-impl Network {
-    pub fn new(id: NetworkId) -> Self {
-        Self {
-            id,
-            pins: Default::default(),
-            connections: Default::default(),
-            state: false,
-        }
-    }
+#[derive(Clone, Default)]
+struct NetworkPins {
+    pins: HashMap<PinId, NodeIndex<usize>>,
+    connections: StableUnGraph<PinId, (), usize>,
+}
 
-    pub fn update(&mut self, pins: &Pins) {
-        self.state = self
-            .connections
-            .node_weights()
-            .any(|p| pins.get_state(*p).unwrap_or(false));
-    }
-
+impl NetworkPins {
     fn get_or_insert_node_idx(&mut self, pin: PinId) -> NodeIndex<usize> {
         if let Some(idx) = self.pins.get(&pin) {
             *idx
@@ -1173,20 +1181,17 @@ impl Network {
         }
     }
 
-    pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) {
+    /// Returns true if an edge was added to the graph, and false if it was not.
+    pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) -> bool {
         let idx_a = self.get_or_insert_node_idx(pin_a);
         let idx_b = self.get_or_insert_node_idx(pin_b);
 
-        self.connections.add_edge(idx_a, idx_b, ());
-    }
-
-    pub fn remove(&mut self, pin: PinId) {
-        let Some(idx) = self.pins.get(&pin) else {
-            return;
-        };
-
-        self.connections.remove_node(*idx);
-        self.pins.remove(&pin);
+        if self.connections.contains_edge(idx_a, idx_b) {
+            false
+        } else {
+            self.connections.add_edge(idx_a, idx_b, ());
+            true
+        }
     }
 
     pub fn iter_connections(&self) -> impl Iterator<Item = (PinId, PinId)> {
@@ -1199,6 +1204,161 @@ impl Network {
                     self.connections.node_weight(b).copied().unwrap(),
                 )
             })
+    }
+
+    fn reprocess_graph(&mut self) -> Option<GraphMutationResult> {
+        let mut graphs = find_isolated_subgraphs(&self.connections);
+        // we sort reverse by size and skip one as we want to be the largest new graph.
+        graphs.sort_by(|l, r| r.len().cmp(&l.len()));
+
+        if graphs[0].len() <= 1 {
+            // this is the largest networks, and even it is too small to exist now.
+            // therefore, none of the (sub-)networks can now exist.
+            return Some(GraphMutationResult::NetworkRemovalRequired);
+        }
+
+        let mut new_data = Vec::new();
+
+        for graph in graphs.into_iter().skip(1) {
+            if graph.len() == 1 {
+                let index = graph.into_iter().next().unwrap();
+                if let Some(pin) = self.connections.remove_node(index) {
+                    self.pins.remove(&pin);
+                }
+                continue;
+            }
+
+            let mut data = NetworkPins::default();
+
+            for (a, b) in graph.into_iter().flat_map(|node| {
+                self.connections
+                    .neighbors(node)
+                    .zip(std::iter::repeat(node))
+                    .map(|(a, b)| (self.connections[a], self.connections[b]))
+            }) {
+                data.connect(a, b);
+            }
+
+            for pin in data.pins.keys() {
+                let idx = self.pins.remove(pin).unwrap();
+                self.connections.remove_node(idx);
+            }
+
+            new_data.push(data);
+        }
+
+        if new_data.len() > 0 {
+            Some(GraphMutationResult::CreateNetworks(new_data))
+        } else {
+            None
+        }
+    }
+
+    pub fn remove(&mut self, pin: PinId) -> Option<GraphMutationResult> {
+        let idx = self.pins.remove(&pin)?;
+        self.connections.remove_node(idx);
+
+        self.reprocess_graph()
+    }
+
+    pub fn disconnect(&mut self, pin_a: PinId, pin_b: PinId) -> Option<GraphMutationResult> {
+        let a = self.pins.get(&pin_a)?;
+        let b = self.pins.get(&pin_b)?;
+
+        let edge = self.connections.find_edge(*a, *b)?;
+
+        self.connections.remove_edge(edge).unwrap();
+
+        self.reprocess_graph()
+    }
+}
+
+impl Network {
+    pub fn get_or_insert_node_idx(&mut self, pin: PinId) -> NodeIndex<usize> {
+        self.pins.get_or_insert_node_idx(pin)
+    }
+
+    /// Returns true if a new connection was added to the network, false if the connection already existed.
+    pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) -> bool {
+        self.pins.connect(pin_a, pin_b)
+    }
+
+    pub fn iter_connections(&self) -> impl Iterator<Item = (PinId, PinId)> {
+        self.pins.iter_connections()
+    }
+
+    pub fn disconnect(&mut self, pin_a: PinId, pin_b: PinId) -> Option<GraphMutationResult> {
+        self.pins.disconnect(pin_a, pin_b)
+    }
+
+    /// Remove a pin from the network. If the removal of the pin resulted in one or more disconnected sub-graphs,
+    /// returns the data to create a new network from the removed pins. This network will always remain as the largest part of the splintered network.
+    /// If singular nodes get disconnected, they are automatically removed from the network.
+    pub fn remove(&mut self, pin: PinId) -> Option<GraphMutationResult> {
+        self.pins.remove(pin)
+    }
+}
+
+fn find_isolated_subgraphs<N, W>(graph: &StableUnGraph<N, W, usize>) -> Vec<Vec<NodeIndex<usize>>> {
+    let mut sub_graphs = Vec::new();
+
+    let mut to_visit = graph.node_indices().collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+
+    while let Some(node) = to_visit.pop() {
+        if visited.contains(&node) {
+            continue;
+        }
+
+        visited.insert(node);
+
+        let mut nodes = HashSet::from([node]);
+
+        fn flood_fill<N, W>(
+            graph: &StableUnGraph<N, W, usize>,
+            node: NodeIndex<usize>,
+            nodes: &mut HashSet<NodeIndex<usize>>,
+        ) {
+            for neighbor in graph.neighbors(node) {
+                if !nodes.contains(&neighbor) {
+                    nodes.insert(neighbor);
+                    flood_fill(graph, neighbor, nodes);
+                }
+            }
+        }
+
+        flood_fill(graph, node, &mut nodes);
+
+        visited.extend(&nodes);
+
+        sub_graphs.push(nodes.into_iter().collect());
+    }
+
+    sub_graphs
+}
+
+enum GraphMutationResult {
+    /// Returned from [`Network::remove`] if the removal resulted in the network becoming too small to exist, so a removal of the network is required.
+    NetworkRemovalRequired,
+    /// Returned from [`Network::remove`] if the removal resulted in one or more isolated sub networks.
+    CreateNetworks(Vec<NetworkPins>),
+}
+
+impl Network {
+    pub fn new(id: NetworkId) -> Self {
+        Self {
+            id,
+            pins: Default::default(),
+            state: false,
+        }
+    }
+
+    pub fn update(&mut self, pins: &Pins) {
+        self.state = self
+            .pins
+            .connections
+            .node_weights()
+            .any(|p| pins.get_state(*p).unwrap_or(false));
     }
 }
 
@@ -1236,7 +1396,7 @@ impl Networks {
 
     pub fn get_network(&self, pin: PinId) -> Option<NetworkId> {
         for network in self.networks.iter() {
-            if network.pins.contains_key(&pin) {
+            if network.pins.pins.contains_key(&pin) {
                 return Some(network.id);
             }
         }
@@ -1250,12 +1410,7 @@ impl Networks {
 
         let mut slot = self.networks.reserve();
         let id = NetworkId(slot.index);
-        slot.set(Network {
-            pins: HashMap::new(),
-            connections: StableGraph::default(),
-            state: false,
-            id,
-        });
+        slot.set(Network::new(id));
 
         id
     }
@@ -1285,8 +1440,29 @@ impl Networks {
         }
     }
 
-    pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) {
-        match (self.get_network(pin_a), self.get_network(pin_b)) {
+    fn handle_mutation(&mut self, network_id: NetworkId, mutation: Option<GraphMutationResult>) {
+        match mutation {
+            None => {}
+            Some(GraphMutationResult::CreateNetworks(networks)) => {
+                for pins in networks {
+                    self.networks.insert_with(|id| Network {
+                        id: NetworkId(id),
+                        pins,
+                        state: false,
+                    });
+                }
+            }
+            Some(GraphMutationResult::NetworkRemovalRequired) => {
+                self.networks.remove(network_id.0);
+            }
+        }
+    }
+
+    pub fn toggle_connect(&mut self, pin_a: PinId, pin_b: PinId) {
+        let network_a = self.get_network(pin_a);
+        let network_b = self.get_network(pin_b);
+
+        match (network_a, network_b) {
             // Neither pin is in a network; create a new one
             (None, None) => {
                 let mut slot = self.networks.reserve();
@@ -1300,7 +1476,10 @@ impl Networks {
             // both pins are in the same network; just connect them.
             (Some(a), Some(b)) if a == b => {
                 let network = self.networks.get_mut(a.0).unwrap();
-                network.connect(pin_a, pin_b);
+                if !network.connect(pin_a, pin_b) {
+                    let mutation = network.disconnect(pin_a, pin_b);
+                    self.handle_mutation(a, mutation);
+                }
             }
             // pins are in different networks; merge them
             (Some(a), Some(b)) => self.merge(a, b),
@@ -1318,11 +1497,53 @@ impl Networks {
         };
 
         let network = self.networks.get_mut(network_id.0).unwrap();
-        network.remove(pin);
 
-        // if there is only one pin in the network or the network is empty, remove it to free up some processing time.
-        if network.pins.len() <= 1 {
-            self.networks.remove(network_id.0);
-        }
+        let mutation = network.remove(pin);
+
+        self.handle_mutation(network_id, mutation);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use petgraph::prelude::StableUnGraph;
+
+    use crate::{Nand, NetworkId, Pin, Simulation, find_isolated_subgraphs};
+
+    #[test]
+    fn test_merging() {
+        let mut simulation = Simulation::default();
+
+        let a = simulation.place_chip(Nand::new(1));
+        let b = simulation.place_chip(Nand::new(1));
+
+        simulation.connect(a, Pin::Left(0), a, Pin::Left(1));
+        simulation.connect(b, Pin::Left(0), b, Pin::Left(1));
+
+        simulation.connect(a, Pin::Left(0), b, Pin::Left(1));
+
+        assert_eq!(simulation.networks.networks.iter().count(), 1);
+
+        let network = simulation.networks.get(NetworkId(0)).unwrap();
+
+        assert_eq!(network.pins.pins.len(), 4);
+    }
+
+    #[test]
+    fn test_isolated_subgraphs() {
+        let mut graph = StableUnGraph::<(), (), usize>::with_capacity(0, 0);
+        let a = graph.add_node(());
+        let b = graph.add_node(());
+        graph.add_edge(a, b, ());
+
+        let c = graph.add_node(());
+        let d = graph.add_node(());
+        graph.add_edge(c, d, ());
+
+        let graphs = find_isolated_subgraphs(&graph);
+
+        assert_eq!(graphs.len(), 2, "wrong amount of subgraphs");
+        assert_eq!(graphs[0].len(), 2, "wrong subgraph length 1");
+        assert_eq!(graphs[1].len(), 2, "wrong subgraph length 2");
     }
 }
