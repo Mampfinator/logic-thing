@@ -1,13 +1,8 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-};
+use std::{cmp::Ordering, collections::HashMap};
 
 use macroquad::{input, prelude::*};
 use petgraph::{
-    Graph,
-    data::DataMap,
-    graph::{DiGraph, NodeIndex},
+    graph::NodeIndex,
     prelude::{StableDiGraph, StableGraph},
 };
 
@@ -18,6 +13,8 @@ struct GameObjects {
     objects: StableVec<GameObjectData>,
     state: StableVec<GameObjectState>,
 }
+
+// TODO: custom metadata on GameObjectState.
 
 /// (barely) copy type storing object metadata.
 /// The first 64 bits are the index of the object in the internal vector, the next 64 can be arbitrary metadata,
@@ -214,7 +211,7 @@ impl TryFrom<ObjectId> for ChipId {
 
 impl GameObject for PinId {
     fn start(&mut self, state: &mut GameObjectState, _: &Simulation, _: &mut GameObjects) {
-        state.draw_priority = 1;
+        state.draw_priority = 2;
 
         state.shape = Some(Shape::Circle(Circle {
             x: state.position.x,
@@ -259,6 +256,10 @@ impl TryFrom<ObjectId> for PinId {
 }
 
 impl GameObject for NetworkId {
+    fn start(&mut self, state: &mut GameObjectState, _: &Simulation, _: &mut GameObjects) {
+        state.draw_priority = 1;
+    }
+
     fn update(&mut self, state: &mut GameObjectState, simulation: &mut Simulation) {
         if simulation.networks.get(*self).is_none() {
             state.despawn();
@@ -415,6 +416,13 @@ async fn main() {
                 .unwrap_or(format!("Pin {}", pin.id.0));
 
             draw_text(&format!("Pin selected: {}", label), 0., 100., 32., WHITE);
+        }
+
+        // sync newly created networks, if any.
+        for network in simulation.networks.ids() {
+            if gameobjects.find_by_meta(&network).is_none() {
+                gameobjects.insert(network, vec2(0., 0.), &simulation);
+            }
         }
 
         camera.update();
@@ -1128,7 +1136,7 @@ impl<T> StableVec<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NetworkId(usize);
 
 struct Network {
@@ -1257,9 +1265,8 @@ impl Networks {
         let move_from;
 
         match network_a.0.cmp(&network_b.0) {
-            Ordering::Equal => panic!(
-                "Cannot merge 2 identical networks. Attempted to merge {network_a:?} with itself."
-            ),
+            // trying to merge one network into itself is a noop.
+            Ordering::Equal => return,
             Ordering::Less => {
                 move_into = network_a;
                 move_from = network_b;
@@ -1279,10 +1286,8 @@ impl Networks {
     }
 
     pub fn connect(&mut self, pin_a: PinId, pin_b: PinId) {
-        let network_a = self.get_network(pin_a);
-        let network_b = self.get_network(pin_b);
-
-        match (network_a, network_b) {
+        match (self.get_network(pin_a), self.get_network(pin_b)) {
+            // Neither pin is in a network; create a new one
             (None, None) => {
                 let mut slot = self.networks.reserve();
                 let id = NetworkId(slot.index);
@@ -1292,18 +1297,19 @@ impl Networks {
 
                 slot.set(network);
             }
+            // both pins are in the same network; just connect them.
+            (Some(a), Some(b)) if a == b => {
+                let network = self.networks.get_mut(a.0).unwrap();
+                network.connect(pin_a, pin_b);
+            }
+            // pins are in different networks; merge them
             (Some(a), Some(b)) => self.merge(a, b),
-            (Some(a), None) => self.add_pin(a, pin_a, pin_b),
-            (None, Some(b)) => self.add_pin(b, pin_a, pin_b),
+            // only one pin is in a network - add the other to it.
+            (Some(network), None) | (None, Some(network)) => {
+                let network = self.networks.get_mut(network.0).unwrap();
+                network.connect(pin_a, pin_b);
+            }
         }
-    }
-
-    fn add_pin(&mut self, network: NetworkId, pin_a: PinId, pin_b: PinId) {
-        self.networks
-            .get_mut(network.0)
-            .as_mut()
-            .unwrap()
-            .connect(pin_a, pin_b);
     }
 
     pub fn remove_pin(&mut self, pin: PinId) {
