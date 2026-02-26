@@ -396,7 +396,7 @@ impl Camera {
     }
 }
 
-#[macroquad::main("Test")]
+#[macroquad::main("Chip Game")]
 async fn main() {
     request_new_screen_size(1080., 720.);
     //set_fullscreen(true);
@@ -426,19 +426,18 @@ async fn main() {
     // simulation
     //     .connect(random, Pin::Right(0), nand, Pin::Left(0))
     //     .unwrap();
-    let clock = simulation.place_chip(Clock::new(100));
+    let clock = simulation.place_chip(Clock::new(5));
     gameobjects.insert(clock, vec2(100., 100.), &simulation);
 
     let counter = simulation.place_chip(Counter8b::default());
     gameobjects.insert(counter, vec2(300., 100.), &simulation);
 
-    // for i in 0..6 {
-    //     simulation.connect(random, Pin::Right(i), nand, Pin::Left(i));
-    // }
+    simulation.connect(clock, Pin::Right(1), counter, Pin::Left(4));
 
-    // for network_id in simulation.networks.ids() {
-    //     gameobjects.insert(network_id, Vec2::ZERO, &simulation);
-    // }
+    let counter2 = simulation.place_chip(Counter8b::default());
+    gameobjects.insert(counter2, vec2(300., 250.), &simulation);
+
+    simulation.connect(counter, Pin::Right(7), counter2, Pin::Left(4));
 
     let mut selected_pin: Option<PinId> = None;
 
@@ -721,7 +720,8 @@ impl Chip for Counter8b {
     fn update(&mut self, state: &mut PinsState) {
         let clock = state.read_wire(Pin::Left(4)).unwrap_or_default();
 
-        if !clock.is_rising_edge() {
+        // for easy chaining. just hook up C7 to CLK on the next chip, and you get a higher bit counter.
+        if !clock.is_falling_edge() {
             return;
         }
 
