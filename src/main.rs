@@ -1,3 +1,4 @@
+use core::f32;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -15,6 +16,7 @@ struct GameObjects {
 }
 
 // TODO: custom metadata on GameObjectState?
+// TODO: chips with custom render code. Like LEDs or displays.
 
 /// (barely) copy type storing object metadata.
 /// The first 64 bits are the index of the object in the internal vector, the next 64 can be arbitrary metadata,
@@ -232,8 +234,38 @@ impl GameObject for PinId {
 
         let pin = simulation.pins.get(*self).unwrap();
 
+        // TODO: text is very unreadable right now. It should probably be offset in the same direction the pin is relative to the chip.
         if let Some(ref text) = pin.label {
-            draw_text(text, position.x, position.y - TILE_SIZE / 2., 24., BLACK);
+            // FIXME: this is really inefficient, since we need to traverse every chip's pin every time.
+            let chip = simulation.chips.get(pin.chip).unwrap();
+            let (index, _) = chip
+                .pins
+                .iter()
+                .enumerate()
+                .find(|(_, pin)| pin.as_ref().map(|other| *other == *self).unwrap_or(false))
+                .unwrap();
+            let pin_side = Pin::from_index(index, chip.size);
+
+            let (text_offset, rotation) = match pin_side {
+                Pin::Right(_) => (vec2(TILE_SIZE / 2., 0.), 0.),
+                Pin::Bottom(_) => (vec2(0., TILE_SIZE / 2.), f32::consts::PI / 2.),
+                Pin::Left(_) => (vec2(-TILE_SIZE * 2.5, 0.), 0.),
+                Pin::Top(_) => (vec2(0., -TILE_SIZE * 2.5), f32::consts::PI / 2.),
+            };
+
+            let text_pos = position + text_offset;
+
+            draw_text_ex(
+                text,
+                text_pos.x,
+                text_pos.y,
+                TextParams {
+                    font_size: 24,
+                    rotation,
+                    color: BLACK,
+                    ..Default::default()
+                },
+            );
         }
     }
 
@@ -276,7 +308,7 @@ impl GameObject for NetworkId {
         for (a, b) in network.iter_connections() {
             let pos_a = objects.find_by_meta(&a).unwrap().position;
             let pos_b = objects.find_by_meta(&b).unwrap().position;
-            draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, 5., color);
+            draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, 2., color);
         }
     }
 
@@ -377,20 +409,28 @@ async fn main() {
     let mut simulation = Simulation::default();
     let mut gameobjects = GameObjects::default();
 
-    let random = simulation.place_chip(RandomNxN::new(16));
-    gameobjects.insert(random, vec2(100., 100.), &simulation);
+    // let random = simulation.place_chip(RandomNxN::new(16));
+    // gameobjects.insert(random, vec2(100., 100.), &simulation);
 
-    let nand = simulation.place_chip(Nand::new(3));
-    gameobjects.insert(nand, vec2(600., 100.), &simulation);
+    // let nand = simulation.place_chip(Nand::new(3));
+    // gameobjects.insert(nand, vec2(600., 100.), &simulation);
 
-    for i in 0..3 {
-        simulation.connect(random, Pin::Right(i), random, Pin::Right(i + 1));
-        simulation.connect(nand, Pin::Left(i), nand, Pin::Left(i + 1));
-    }
+    // let counter = simulation.place_chip(Counter8b::default());
+    // gameobjects.insert(counter, vec2(600., 400.), &simulation);
 
-    simulation
-        .connect(random, Pin::Right(0), nand, Pin::Left(0))
-        .unwrap();
+    // for i in 0..3 {
+    //     simulation.connect(random, Pin::Right(i), random, Pin::Right(i + 1));
+    //     simulation.connect(nand, Pin::Left(i), nand, Pin::Left(i + 1));
+    // }
+
+    // simulation
+    //     .connect(random, Pin::Right(0), nand, Pin::Left(0))
+    //     .unwrap();
+    let clock = simulation.place_chip(Clock::new(100));
+    gameobjects.insert(clock, vec2(100., 100.), &simulation);
+
+    let counter = simulation.place_chip(Counter8b::default());
+    gameobjects.insert(counter, vec2(300., 100.), &simulation);
 
     // for i in 0..6 {
     //     simulation.connect(random, Pin::Right(i), nand, Pin::Left(i));
@@ -578,7 +618,7 @@ impl Chip for Clock {
         // |      |- CLK
         // |______|
         //
-        let mut layout = PinLayout::new(1, 1);
+        let mut layout = PinLayout::new(1, 2);
 
         // inverted clock signal
         layout.set(
@@ -626,7 +666,6 @@ impl Chip for Nand {
         let mut layout = PinLayout::new(2, self.gates * 2);
 
         for i in 0..self.gates {
-            println!("Making gate {i} for Nand.");
             layout.set(Pin::Left(2 * i), PinDef::new(format!("IN{}", 2 * i)));
             layout.set(
                 Pin::Left(2 * i + 1),
@@ -641,14 +680,56 @@ impl Chip for Nand {
 
     fn update(&mut self, state: &mut PinsState) {
         for i in 0..self.gates {
-            let a = state.read_wire(Pin::Left(2 * i)).unwrap_or(false);
-            let b = state.read_wire(Pin::Left(2 * i + 1)).unwrap_or(false);
+            let a = state
+                .read_wire(Pin::Left(2 * i))
+                .unwrap_or_default()
+                .is_high();
+            let b = state
+                .read_wire(Pin::Left(2 * i + 1))
+                .unwrap_or_default()
+                .is_high();
 
             let value = !(a && b);
-
-            println!("Setting Nand to {value}");
-
             state.set(Pin::Right(i * 2), value);
+        }
+    }
+}
+
+#[derive(Default)]
+struct Counter8b {
+    count: u8,
+}
+
+impl Chip for Counter8b {
+    fn setup(&self) -> PinLayout {
+        PinLayout::new_with(
+            uvec2(2, 8),
+            [
+                (Pin::Left(4), PinDef::new("CLK")),
+                (Pin::Right(0), PinDef::new("C0")),
+                (Pin::Right(1), PinDef::new("C1")),
+                (Pin::Right(2), PinDef::new("C2")),
+                (Pin::Right(3), PinDef::new("C3")),
+                (Pin::Right(4), PinDef::new("C4")),
+                (Pin::Right(5), PinDef::new("C5")),
+                (Pin::Right(6), PinDef::new("C6")),
+                (Pin::Right(7), PinDef::new("C7")),
+            ],
+        )
+    }
+
+    fn update(&mut self, state: &mut PinsState) {
+        let clock = state.read_wire(Pin::Left(4)).unwrap_or_default();
+
+        if !clock.is_rising_edge() {
+            return;
+        }
+
+        self.count = self.count.wrapping_add(1);
+
+        for i in 0..8u8 {
+            let pin_state = (self.count & 1u8 << i) > 0;
+            state.set(Pin::Right(i as usize), pin_state);
         }
     }
 }
@@ -806,9 +887,6 @@ impl Pins {
         let mut pins = Vec::new();
 
         for pin_def in layout.state.iter() {
-            if let Some(pin) = pin_def.as_ref() {
-                println!("Registering pin {:?} of {:?}", pin, id);
-            }
             let id = pin_def.clone().map(|def| self.register(id, def));
             pins.push(id);
         }
@@ -905,7 +983,7 @@ impl PinsState<'_> {
     }
 
     /// Reads the current input state of this pin, usually provided by other chips.
-    pub fn read_wire(&self, pin: Pin) -> Option<bool> {
+    pub fn read_wire(&self, pin: Pin) -> Option<NetworkState> {
         let pin = self.get_pin_id(pin)?;
         let network = self.networks.get_network(pin)?;
         self.networks.get_state(network)
@@ -1161,6 +1239,7 @@ struct NetworkId(usize);
 struct Network {
     pins: NetworkPins,
     state: bool,
+    last_state: bool,
     id: NetworkId,
 }
 
@@ -1350,10 +1429,12 @@ impl Network {
             id,
             pins: Default::default(),
             state: false,
+            last_state: false,
         }
     }
 
     pub fn update(&mut self, pins: &Pins) {
+        self.last_state = self.state;
         self.state = self
             .pins
             .connections
@@ -1365,6 +1446,46 @@ impl Network {
 #[derive(Default)]
 struct Networks {
     networks: StableVec<Network>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum NetworkState {
+    /// Network is transitioning from low to high. This is counted as a high state for [Self::is_high].
+    RisingEdge,
+    /// Network is transitioning from high to low. This is counted as a low state for [Self::is_low].
+    FallingEdge,
+    /// Network is stable high
+    High,
+    #[default]
+    /// Network is stable low
+    Low,
+}
+
+impl NetworkState {
+    pub fn is_rising_edge(&self) -> bool {
+        matches!(self, Self::RisingEdge)
+    }
+
+    pub fn is_falling_edge(&self) -> bool {
+        matches!(self, Self::FallingEdge)
+    }
+
+    pub fn is_high(&self) -> bool {
+        matches!(self, Self::High | Self::RisingEdge)
+    }
+
+    pub fn is_low(&self) -> bool {
+        matches!(self, Self::Low | Self::FallingEdge)
+    }
+
+    pub fn new(last_state: bool, current_state: bool) -> Self {
+        match (last_state, current_state) {
+            (true, true) => Self::High,
+            (true, false) => Self::FallingEdge,
+            (false, false) => Self::Low,
+            (false, true) => Self::RisingEdge,
+        }
+    }
 }
 
 impl Networks {
@@ -1386,12 +1507,12 @@ impl Networks {
             .filter_map(|(id, network)| network.as_ref().map(|_| NetworkId(id)))
     }
 
-    pub fn get_state(&self, network: NetworkId) -> Option<bool> {
+    pub fn get_state(&self, network: NetworkId) -> Option<NetworkState> {
         self.networks
             .buffer
             .get(network.0)?
             .as_ref()
-            .map(|n| n.state)
+            .map(|n| NetworkState::new(n.last_state, n.state))
     }
 
     pub fn get_network(&self, pin: PinId) -> Option<NetworkId> {
@@ -1449,6 +1570,7 @@ impl Networks {
                         id: NetworkId(id),
                         pins,
                         state: false,
+                        last_state: false,
                     });
                 }
             }
