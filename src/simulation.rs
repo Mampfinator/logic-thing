@@ -256,11 +256,15 @@ impl PinsState<'_> {
         state.map(|s| s.state)
     }
 
-    /// Reads the current input state of this pin, usually provided by other chips.
-    pub fn read_wire(&self, pin: Pin) -> Option<NetworkState> {
-        let pin = self.get_pin_id(pin)?;
-        let network = self.networks.get_network(pin)?;
-        self.networks.get_state(network)
+    /// Reads the current input state of this pin, usually provided by other chips. If a pin is not connected to anything,
+    /// it's considered low. Note that in this case, it does **not** consider the output of the pin itself.
+    /// So when you try to read from a pin that is set to high and is not connected to anything else, this will return low.
+    /// If you need to check what a pin is set to, see [`Self::read_output`].
+    pub fn read_wire(&self, pin: Pin) -> NetworkState {
+        self.get_pin_id(pin)
+            .and_then(|pin| self.networks.get_network(pin))
+            .and_then(|network| self.networks.get_state(network))
+            .unwrap_or_default()
     }
 }
 

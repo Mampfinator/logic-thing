@@ -8,6 +8,7 @@ use crate::simulation::{
 
 pub const TILE_SIZE: f32 = 16.0;
 
+pub mod cpu;
 pub mod simulation;
 
 #[derive(Default)]
@@ -115,8 +116,10 @@ macro_rules! impl_mgo {
 impl_mgo!(
     Clock,
     Counter8b,
+    TieHigh,
     Led as LedRenderer where Args: (Color),
-    NumericDisplay as NumericDisplayRenderer
+    NumericDisplay as NumericDisplayRenderer,
+    cpu::CPU,
 );
 
 // TODO: custom metadata on GameObjectState?
@@ -582,27 +585,38 @@ async fn main() {
     // simulation
     //     .connect(random, Pin::Right(0), nand, Pin::Left(0))
     //     .unwrap();
-    let (clock, _) = game.place_chip(Clock::new(5), vec2(100., 100.), ());
+    // let (clock, _) = game.place_chip(Clock::new(5), vec2(100., 100.), ());
 
-    let (counter, _) = game.place_chip(Counter8b::default(), vec2(300., 100.), ());
+    // let (counter, _) = game.place_chip(Counter8b::default(), vec2(300., 100.), ());
+
+    // game.simulation
+    //     .connect(clock, Pin::Right(1), counter, Pin::Left(4));
+
+    // let (counter2, _) = game.place_chip(Counter8b::default(), vec2(300., 250.), ());
+
+    // game.simulation
+    //     .connect(counter, Pin::Right(7), counter2, Pin::Left(4));
+
+    // let (led, _) = game.place_chip(Led, vec2(500., 100.), RED);
+
+    // game.simulation
+    //     .connect(counter, Pin::Right(5), led, Pin::Left(0));
+
+    let [cpu, high, clock] = game.place_chips((
+        (cpu::CPU::default(), vec2(100., 100.)),
+        (TieHigh, vec2(-25., 100.)),
+        (Clock::new(1), vec2(-25., 116.)),
+    ));
 
     game.simulation
-        .connect(clock, Pin::Right(1), counter, Pin::Left(4));
-
-    let (counter2, _) = game.place_chip(Counter8b::default(), vec2(300., 250.), ());
+        .connect(cpu.0, Pin::Left(0), high.0, Pin::Right(0));
+    game.simulation
+        .connect(cpu.0, Pin::Left(2), clock.0, Pin::Right(1));
 
     game.simulation
-        .connect(counter, Pin::Right(7), counter2, Pin::Left(4));
-
-    let (led, _) = game.place_chip(Led, vec2(500., 100.), RED);
-
-    game.simulation
-        .connect(counter, Pin::Right(5), led, Pin::Left(0));
+        .connect(cpu.0, cpu::DATA_PINS[0], high.0, Pin::Right(0));
 
     let mut selected_pin: Option<PinId> = None;
-
-    let [(clock2, _), (led2, _)] =
-        game.place_chips(((Clock::new(100), vec2(0., 0.)), (Led, vec2(10., 20.), RED)));
 
     for _ in 0.. {
         clear_background(SKYBLUE);
@@ -658,105 +672,17 @@ async fn main() {
     }
 }
 
-struct Test {
-    current_tick: u8,
-    pin: Pin,
-}
+struct TieHigh;
 
-struct RandomNxN {
-    n: usize,
-}
-
-impl RandomNxN {
-    pub fn new(n: usize) -> Self {
-        Self { n }
-    }
-}
-
-impl TryFrom<(usize, usize)> for Pin {
-    type Error = ();
-    fn try_from((side, id): (usize, usize)) -> Result<Self, Self::Error> {
-        Ok(match side {
-            0 => Pin::Right(id),
-            1 => Pin::Bottom(id),
-            2 => Pin::Left(id),
-            3 => Pin::Top(id),
-            _ => return Err(()),
-        })
-    }
-}
-
-impl Chip for RandomNxN {
+impl Chip for TieHigh {
     fn setup(&self) -> PinLayout {
         PinLayout::new_with(
-            uvec2(self.n as u32, self.n as u32),
-            (0..4)
-                .flat_map(|side| std::iter::repeat(side).zip(0..self.n as usize))
-                .map(|(side, id)| {
-                    let pin = match side {
-                        0 => Pin::Right(id),
-                        1 => Pin::Bottom(id),
-                        2 => Pin::Left(id),
-                        3 => Pin::Top(id),
-                        _ => unreachable!(),
-                    };
-
-                    (pin, PinDef::new(simple_pin_name(pin)))
-                }),
+            uvec2(1, 1),
+            [(Pin::Right(0), PinDef::new_with_state("HIGH", true))],
         )
     }
 
-    fn update(&mut self, state: &mut PinsState) {
-        let side = rand::gen_range::<usize>(0, 4);
-        let id = rand::gen_range::<usize>(0, self.n);
-
-        let pin = Pin::try_from((side, id)).unwrap();
-        state.toggle(pin);
-    }
-}
-
-impl Test {
-    pub fn new(pin: Pin) -> Self {
-        Self {
-            current_tick: 0,
-            pin,
-        }
-    }
-}
-
-fn simple_pin_name(pin: Pin) -> String {
-    match pin {
-        Pin::Right(i) => format!("R{i}"),
-        Pin::Bottom(i) => format!("B{i}"),
-        Pin::Left(i) => format!("L{i}"),
-        Pin::Top(i) => format!("T{i}"),
-    }
-}
-
-impl Chip for Test {
-    fn setup(&self) -> PinLayout {
-        PinLayout::new_with(
-            uvec2(2, 2),
-            [(self.pin, PinDef::new(simple_pin_name(self.pin)))],
-        )
-    }
-
-    fn update(&mut self, state: &mut PinsState) {
-        self.current_tick += 1;
-        self.current_tick %= 8;
-
-        let id = self.current_tick as usize % 2;
-
-        let pin = match self.current_tick {
-            0 | 1 => Pin::Right(id),
-            2 | 3 => Pin::Bottom(id),
-            4 | 5 => Pin::Left(id),
-            6 | 7 => Pin::Top(id),
-            _ => unreachable!(),
-        };
-
-        state.try_toggle(pin);
-    }
+    fn update(&mut self, _: &mut PinsState) {}
 }
 
 struct Clock {
@@ -843,14 +769,8 @@ impl Chip for Nand {
 
     fn update(&mut self, state: &mut PinsState) {
         for i in 0..self.gates {
-            let a = state
-                .read_wire(Pin::Left(2 * i))
-                .unwrap_or_default()
-                .is_high();
-            let b = state
-                .read_wire(Pin::Left(2 * i + 1))
-                .unwrap_or_default()
-                .is_high();
+            let a = state.read_wire(Pin::Left(2 * i)).is_high();
+            let b = state.read_wire(Pin::Left(2 * i + 1)).is_high();
 
             let value = !(a && b);
             state.set(Pin::Right(i * 2), value);
@@ -882,7 +802,7 @@ impl Chip for Counter8b {
     }
 
     fn update(&mut self, state: &mut PinsState) {
-        let clock = state.read_wire(Pin::Left(4)).unwrap_or_default();
+        let clock = state.read_wire(Pin::Left(4));
 
         // for easy chaining. just hook up C7 to CLK on the next chip, and you get a higher bit counter.
         if !clock.is_falling_edge() {
