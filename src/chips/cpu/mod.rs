@@ -1,30 +1,6 @@
 use macroquad::math::uvec2;
 
-use crate::simulation::{Chip, Pin, PinDef, PinLayout, PinsState};
-
-trait AsBits<const SIZE: usize> {
-    fn as_bits(&self) -> [bool; SIZE];
-}
-
-impl AsBits<8> for u8 {
-    fn as_bits(&self) -> [bool; 8] {
-        (0..8)
-            .map(|shift| (self >> shift) & 1 > 0)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-}
-
-impl AsBits<16> for u16 {
-    fn as_bits(&self) -> [bool; 16] {
-        (0..16)
-            .map(|shift| (self >> shift) & 1 > 0)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-}
+use crate::simulation::{AsBits, Chip, Pin, PinDef, PinLayout, PinsState};
 
 /// Simple 8 bit CPU (with 8 bit addresses for now because I'm lazy.)
 #[derive(Default)]
@@ -167,7 +143,7 @@ impl DecodeState {
     }
 
     pub fn try_parse_instruction(&self) -> Result<Option<Instruction>, DecodeError> {
-        if self.bytes.len() > 4 {
+        if self.bytes.len() > 5 {
             Err(DecodeError::Other("invalid instruction".into()))
         } else {
             Ok(Instruction::try_parse(&self.bytes))
@@ -177,7 +153,7 @@ impl DecodeState {
 
 enum Instruction {
     Nop,
-    Move(u8, u8),
+    Move(u16, u16),
     Jump(u16),
 }
 
@@ -187,7 +163,10 @@ impl Instruction {
             [0x1, target_high, target_low] => {
                 Some(Self::Jump(u16::from_le_bytes([*target_high, *target_low])))
             }
-            [0x2, from, to] => Some(Self::Move(*from, *to)),
+            [0x2, from_high, from_low, to_high, to_low] => Some(Self::Move(
+                u16::from_le_bytes([*from_high, *from_low]),
+                u16::from_le_bytes([*to_high, *to_low]),
+            )),
             _ => None,
         }
     }
@@ -207,7 +186,7 @@ impl Instruction {
 
 #[cfg(test)]
 mod tests {
-    use crate::cpu::AsBits;
+    use crate::chips::cpu::AsBits;
 
     #[test]
     fn test_as_bits() {

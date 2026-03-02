@@ -181,6 +181,10 @@ impl Pins {
     pub fn get(&self, pin: PinId) -> Option<&PinMeta> {
         self.pins.get(pin.0)
     }
+
+    pub fn get_mut(&mut self, pin: PinId) -> Option<&mut PinMeta> {
+        self.pins.get_mut(pin.0)
+    }
 }
 
 enum PinMutation {
@@ -265,6 +269,70 @@ impl PinsState<'_> {
             .and_then(|pin| self.networks.get_network(pin))
             .and_then(|network| self.networks.get_state(network))
             .unwrap_or_default()
+    }
+
+    pub fn read_array<const N: usize>(&self, pins: &[Pin; N]) -> [NetworkState; N] {
+        let mut output = [NetworkState::Low; N];
+        for (i, pin) in pins.iter().copied().enumerate() {
+            output[i] = self.read_wire(pin)
+        }
+
+        output
+    }
+
+    pub fn set_array<const N: usize>(&mut self, pins: &[Pin; N], value: impl AsBits<N>) {
+        for (state, pin) in value.as_bits().into_iter().zip(pins.iter().copied()) {
+            self.set(pin, state);
+        }
+    }
+}
+
+pub trait AsInteger<I> {
+    fn as_integer(self) -> I;
+}
+
+macro_rules! impl_as_integer {
+    ($int:ty, $num:expr) => {
+        impl AsInteger<$int> for [NetworkState; $num] {
+            fn as_integer(self) -> $int {
+                self.into_iter().enumerate().fold(0, |acc, (index, value)| {
+                    acc | (value.is_high() as $int) << index
+                })
+            }
+        }
+    };
+}
+
+impl_as_integer!(u8, 8);
+impl_as_integer!(u16, 16);
+
+pub trait AsBits<const SIZE: usize> {
+    fn as_bits(&self) -> [bool; SIZE];
+}
+
+impl<const SIZE: usize> AsBits<SIZE> for [bool; SIZE] {
+    fn as_bits(&self) -> [bool; SIZE] {
+        *self
+    }
+}
+
+impl AsBits<8> for u8 {
+    fn as_bits(&self) -> [bool; 8] {
+        (0..8)
+            .map(|shift| (self >> shift) & 1 > 0)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
+}
+
+impl AsBits<16> for u16 {
+    fn as_bits(&self) -> [bool; 16] {
+        (0..16)
+            .map(|shift| (self >> shift) & 1 > 0)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
     }
 }
 

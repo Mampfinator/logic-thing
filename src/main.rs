@@ -2,14 +2,19 @@ use core::f32;
 
 use macroquad::{input, prelude::*};
 
-use crate::simulation::{
-    Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation, StableVec,
+use crate::{
+    chips::{button, rom, switch},
+    simulation::{
+        Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation, StableVec,
+    },
 };
 
 pub const TILE_SIZE: f32 = 16.0;
 
-pub mod cpu;
+pub mod chips;
 pub mod simulation;
+
+use chips::cpu::{CPU, DATA_PINS};
 
 #[derive(Default)]
 struct GameObjects {
@@ -66,19 +71,20 @@ trait MakeGameObject: Chip {
 /// Implement [`MakeGameObject`] for a series of types.
 /// Additional options per type include `Type as Other` where `Other` implements `From<ChipId>`,
 /// and `Type as Other where Args: (...Args)` where `Other` implements a method `new(ChipId, Args)`.
+#[macro_export]
 macro_rules! impl_mgo {
     ($type:ty) => {
-        impl MakeGameObject for $type {
+        impl crate::MakeGameObject for $type {
             type Args = ();
-            type Obj = ChipId;
-            fn make_game_object(id: ChipId, _args: ()) -> ChipId {
+            type Obj = crate::ChipId;
+            fn make_game_object(id: crate::ChipId, _args: ()) -> crate::ChipId {
                 id
             }
         }
     };
 
     ($type:ty as $obj:ty) => {
-        impl MakeGameObject for $type {
+        impl crate::MakeGameObject for $type {
             type Args = ();
             type Obj = $obj;
             fn make_game_object(id: ChipId, _args: ()) -> Self::Obj {
@@ -89,7 +95,7 @@ macro_rules! impl_mgo {
     };
 
     ($type:ty as $obj:ty where Args: $($args:ty),*) => {
-        impl MakeGameObject for $type {
+        impl crate::MakeGameObject for $type {
             #[allow(unused_parens)]
             type Args = ($($args),*);
             type Obj = $obj;
@@ -119,7 +125,7 @@ impl_mgo!(
     TieHigh,
     Led as LedRenderer where Args: (Color),
     NumericDisplay as NumericDisplayRenderer,
-    cpu::CPU,
+    CPU,
 );
 
 // TODO: custom metadata on GameObjectState?
@@ -199,11 +205,11 @@ impl GameObjects {
         self.state.get(index)
     }
 
-    pub fn update(&mut self, simulation: &mut Simulation) {
+    pub fn update(&mut self, simulation: &mut Simulation, camera: &mut Camera) {
         let mut despawned = Vec::new();
 
         for (object, state) in self.objects.iter_mut().zip(self.state.iter_mut()) {
-            object.object.update(state, simulation);
+            object.object.update(state, simulation, camera);
             if state.should_despawn {
                 despawned.push(object.id);
             }
@@ -270,7 +276,13 @@ trait GameObject {
     }
     fn render(&self, state: &GameObjectState, simulation: &Simulation, objects: &GameObjects);
     #[allow(unused)]
-    fn update(&mut self, state: &mut GameObjectState, simulation: &mut Simulation) {}
+    fn update(
+        &mut self,
+        state: &mut GameObjectState,
+        simulation: &mut Simulation,
+        camera: &mut Camera,
+    ) {
+    }
     fn make_oid_meta(&self) -> (usize, u8) {
         (0, 0)
     }
@@ -400,7 +412,7 @@ impl GameObject for NetworkId {
         state.draw_priority = 1;
     }
 
-    fn update(&mut self, state: &mut GameObjectState, simulation: &mut Simulation) {
+    fn update(&mut self, state: &mut GameObjectState, simulation: &mut Simulation, _: &mut Camera) {
         if simulation.networks.get(*self).is_none() {
             state.despawn();
         }
@@ -603,7 +615,7 @@ async fn main() {
     //     .connect(counter, Pin::Right(5), led, Pin::Left(0));
 
     let [cpu, high, clock] = game.place_chips((
-        (cpu::CPU::default(), vec2(100., 100.)),
+        (CPU::default(), vec2(100., 100.)),
         (TieHigh, vec2(-25., 100.)),
         (Clock::new(1), vec2(-25., 116.)),
     ));
@@ -614,7 +626,30 @@ async fn main() {
         .connect(cpu.0, Pin::Left(2), clock.0, Pin::Right(1));
 
     game.simulation
-        .connect(cpu.0, cpu::DATA_PINS[0], high.0, Pin::Right(0));
+        .connect(cpu.0, DATA_PINS[0], high.0, Pin::Right(0));
+
+    let mut rom = [0; 256];
+    for i in 0..u8::MAX {
+        rom[i as usize] = i;
+    }
+
+    let [rom, switches, high_2, button] = game.place_chips((
+        (rom::ROM::from(rom), vec2(500., 100.)),
+        (switch::Switch::new(8), vec2(300., 116.), 8),
+        (TieHigh, vec2(348., 100. - TILE_SIZE)),
+        (button::Button, vec2(348., 100.)),
+    ));
+
+    for i in 0..8 {
+        game.simulation
+            .connect(rom.0, Pin::Left(i + 1), switches.0, Pin::Right(i));
+    }
+
+    game.simulation
+        .connect(high_2.0, Pin::Right(0), rom.0, Pin::Left(0));
+
+    game.simulation
+        .connect(button.0, Pin::Right(0), rom.0, Pin::Right(0));
 
     let mut selected_pin: Option<PinId> = None;
 
@@ -663,7 +698,7 @@ async fn main() {
 
         camera.update();
 
-        game.game_objects.update(&mut game.simulation);
+        game.game_objects.update(&mut game.simulation, &mut camera);
         game.game_objects.render(&game.simulation);
 
         draw_fps();
