@@ -171,7 +171,7 @@ impl Instruction {
         }
     }
 
-    pub fn run(self, state: &mut PinsState, cpu: &mut CPU) {
+    pub fn run(self, _state: &mut PinsState, cpu: &mut CPU) {
         match self {
             Self::Nop => {}
             Self::Move(from, to) => {

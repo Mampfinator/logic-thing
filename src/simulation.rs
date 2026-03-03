@@ -502,7 +502,7 @@ impl<T> Default for StableVec<T> {
 
 pub struct Slot<'a, T> {
     pub index: usize,
-    slot: &'a mut Option<T>,
+    pub slot: &'a mut Option<T>,
 }
 
 impl<T> Slot<'_, T> {

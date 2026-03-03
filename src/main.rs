@@ -1,6 +1,15 @@
 use core::f32;
+use std::{
+    collections::{HashMap, HashSet},
+    default,
+};
 
 use macroquad::{input, prelude::*};
+use petgraph::{
+    Direction::{Incoming, Outgoing},
+    prelude::{NodeIndex, StableDiGraph},
+    visit::EdgeRef,
+};
 
 use crate::{
     chips::{button, rom, switch},
@@ -17,15 +26,122 @@ pub mod simulation;
 use chips::cpu::{CPU, DATA_PINS};
 
 #[derive(Default)]
-struct GameObjects {
+pub struct GameObjects {
     objects: StableVec<GameObjectData>,
     state: StableVec<GameObjectState>,
+    hierarchy: Hierarchy,
+}
+
+#[derive(Default)]
+struct Hierarchy {
+    indices: HashMap<ObjectId, NodeIndex>,
+    roots: HashSet<NodeIndex>,
+    graph: StableDiGraph<ObjectId, ()>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParentError {
+    AlreadyParented,
+    ChildToParent,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DeparentError {
+    NoSuchNode,
+    NoSuchRelationship,
+}
+
+impl Hierarchy {
+    fn insert_root(&mut self, object: ObjectId) -> Option<NodeIndex> {
+        if self.indices.contains_key(&object) {
+            return None;
+        }
+
+        let index = self.graph.add_node(object);
+        self.indices.insert(object, index);
+        self.roots.insert(index);
+
+        Some(index)
+    }
+
+    fn get_or_insert_node(&mut self, node: ObjectId) -> NodeIndex {
+        if let Some(index) = self.indices.get(&node) {
+            *index
+        } else {
+            self.insert_root(node).unwrap()
+        }
+    }
+
+    pub fn set_parent(&mut self, child: ObjectId, parent: ObjectId) -> Result<(), ParentError> {
+        let child = self.get_or_insert_node(child);
+        let parent = self.get_or_insert_node(parent);
+
+        if self.graph.edges_connecting(child, parent).count() > 0 {
+            return Err(ParentError::AlreadyParented);
+        } else if self.graph.edges_connecting(parent, child).count() > 0 {
+            return Err(ParentError::ChildToParent);
+        }
+
+        self.graph.add_edge(child, parent, ());
+        Ok(())
+    }
+
+    pub fn deparent(&mut self, node: ObjectId) -> Result<(), DeparentError> {
+        let child = self.indices.get(&node).ok_or(DeparentError::NoSuchNode)?;
+        let edge = self
+            .graph
+            .edges_directed(*child, Outgoing)
+            .next()
+            .ok_or(DeparentError::NoSuchRelationship)?
+            .id();
+
+        self.graph.remove_edge(edge);
+
+        self.roots.insert(*child);
+
+        Ok(())
+    }
+
+    fn get_children_indices(&self, parent: ObjectId) -> Option<Vec<NodeIndex>> {
+        let index = *self.indices.get(&parent)?;
+        fn visit(node: NodeIndex, vec: &mut Vec<NodeIndex>, graph: &StableDiGraph<ObjectId, ()>) {
+            let children = graph.neighbors_directed(node, Incoming).collect::<Vec<_>>();
+            vec.extend(children.iter().copied());
+
+            for child in children.into_iter() {
+                visit(child, vec, graph);
+            }
+        }
+
+        let mut out = Vec::new();
+
+        visit(index, &mut out, &self.graph);
+
+        Some(out)
+    }
+
+    pub fn get_children(&self, parent: ObjectId) -> Option<Vec<ObjectId>> {
+        self.get_children_indices(parent)?
+            .into_iter()
+            .map(|index| self.graph.node_weight(index).copied().unwrap())
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    pub fn remove_recursively(&mut self, parent: ObjectId) -> Option<Vec<ObjectId>> {
+        self.get_children_indices(parent)?
+            .into_iter()
+            .map(|index| self.graph.remove_node(index).unwrap())
+            .collect::<Vec<_>>()
+            .into()
+    }
 }
 
 #[derive(Default)]
 struct Game {
     pub simulation: Simulation,
     pub game_objects: GameObjects,
+    pub camera: Camera,
 }
 
 impl Game {
@@ -56,9 +172,68 @@ impl Game {
         let id = self.simulation.place_chip(chip);
 
         let object = C::make_game_object(id, args);
-        let oid = self.game_objects.insert(object, position, &self.simulation);
+        let oid = self
+            .game_objects
+            .insert(object, position, &mut self.simulation);
 
         (id, oid)
+    }
+
+    pub fn update(&mut self) {
+        self.camera.update();
+
+        // process mouse information.
+        let mouse_pos = self.camera.get_mouse_world_pos();
+        let clicked = input::is_mouse_button_pressed(MouseButton::Left);
+        let released = input::is_mouse_button_released(MouseButton::Left);
+
+        let mut buffer = CommandBuffer::default();
+
+        for (id, object, state) in self.game_objects.iter_mut() {
+            let Some(is_inside) = state.shape.as_ref().map(|shape| shape.contains(mouse_pos))
+            else {
+                continue;
+            };
+
+            let mut ctx = ObjectContextMut::new(state, id, &mut buffer);
+
+            if is_inside && !ctx.state.hovered {
+                ctx.state.hovered = true;
+                object.on_mouse_enter(&mut ctx, &mut self.simulation);
+            }
+
+            if !is_inside && ctx.state.hovered {
+                ctx.state.hovered = false;
+                object.on_mouse_exit(&mut ctx, &mut self.simulation);
+            }
+
+            if is_inside && clicked {
+                object.on_click(&mut ctx, &mut self.simulation);
+            }
+
+            if is_inside && released {
+                object.on_mouse_enter(&mut ctx, &mut self.simulation);
+            }
+        }
+
+        buffer.apply(&mut self.game_objects, &mut self.simulation);
+
+        for (id, object, state) in self.game_objects.iter_mut() {
+            let mut ctx = ObjectContextMut::new(state, id, &mut buffer);
+            object.update(&mut ctx, &mut self.simulation, &mut self.camera);
+        }
+
+        buffer.apply(&mut self.game_objects, &mut self.simulation);
+    }
+
+    pub fn render(&self) {
+        for (id, object, state) in self.game_objects.iter() {
+            object.render(
+                &ObjectContext::new(state, id),
+                &self.simulation,
+                &self.game_objects,
+            );
+        }
     }
 }
 
@@ -68,9 +243,11 @@ trait MakeGameObject: Chip {
     fn make_game_object(id: ChipId, args: Self::Args) -> Self::Obj;
 }
 
+// TODO: make derive macro instead
+// eventually.
 /// Implement [`MakeGameObject`] for a series of types.
 /// Additional options per type include `Type as Other` where `Other` implements `From<ChipId>`,
-/// and `Type as Other where Args: (...Args)` where `Other` implements a method `new(ChipId, Args)`.
+/// and `Type as Other where Args = (...Args)` where `Other` implements a method `new(ChipId, Args)`.
 #[macro_export]
 macro_rules! impl_mgo {
     ($type:ty) => {
@@ -94,7 +271,7 @@ macro_rules! impl_mgo {
         }
     };
 
-    ($type:ty as $obj:ty where Args: $($args:ty),*) => {
+    ($type:ty as $obj:ty where Args = $($args:ty),*) => {
         impl crate::MakeGameObject for $type {
             #[allow(unused_parens)]
             type Args = ($($args),*);
@@ -108,12 +285,12 @@ macro_rules! impl_mgo {
 
     (
         $(
-            $type:ty $(as $obj:ty $(where Args: ($($args:ty),*))?)?
+            $type:ty $(as $obj:ty $(where Args = ($($args:ty),*))?)?
         ),+ $(,)?
     ) => {
         $(
             impl_mgo!(
-                $type $(as $obj $(where Args: $($args),*)?)?
+                $type $(as $obj $(where Args = $($args),*)?)?
             );
         )+
     };
@@ -123,23 +300,157 @@ impl_mgo!(
     Clock,
     Counter8b,
     TieHigh,
-    Led as LedRenderer where Args: (Color),
-    NumericDisplay as NumericDisplayRenderer,
+    Led as LedObj where Args = (Color),
+    NumericDisplay as NumericDisplayObj,
     CPU,
 );
 
 // TODO: custom metadata on GameObjectState?
-
 /// (barely) copy type storing object metadata.
 /// The first 64 bits are the index of the object in the internal vector, the next 64 can be arbitrary metadata,
 /// and the last 8 are a type identifier.
 /// This metadata is mainly used to find position data about other simulation objects during rendering.
-#[derive(Clone, Copy, Debug)]
-struct ObjectId(usize, usize, u8);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectId(usize, usize, u8);
 
 struct GameObjectData {
     object: Box<dyn GameObject>,
     id: ObjectId,
+}
+
+#[derive(Default)]
+pub struct CommandBuffer {
+    commands: Vec<Box<dyn ObjectCommand>>,
+}
+
+impl CommandBuffer {
+    pub fn push<C: ObjectCommand>(&mut self, command: C) {
+        self.commands.push(Box::new(command))
+    }
+
+    pub fn apply(&mut self, game_objects: &mut GameObjects, simulation: &mut Simulation) {
+        for mut command in self.commands.drain(0..) {
+            command.apply(game_objects, simulation)
+        }
+    }
+}
+
+pub struct ObjectContextMut<'a, 'b> {
+    state: &'a mut GameObjectState,
+    id: ObjectId,
+    commands: &'b mut CommandBuffer,
+}
+
+impl<'a, 'b> ObjectContextMut<'a, 'b> {
+    pub fn new(
+        state: &'a mut GameObjectState,
+        id: ObjectId,
+        commands: &'b mut CommandBuffer,
+    ) -> Self {
+        Self {
+            state,
+            id,
+            commands,
+        }
+    }
+
+    pub fn push<C: ObjectCommand>(&mut self, command: C) -> &mut Self {
+        self.commands.push(command);
+        self
+    }
+
+    pub fn move_by(&mut self, offset: Vec2) -> &mut Self {
+        self.push(MoveBy(self.id, offset))
+    }
+
+    pub fn set_shape(&mut self, shape: Shape) -> &mut Self {
+        self.state.shape = Some(shape);
+        self
+    }
+
+    pub fn set_draw_priority(&mut self, priority: usize) -> &mut Self {
+        self.state.draw_priority = priority;
+        self
+    }
+
+    pub fn despawn(&mut self) -> &mut Self {
+        self.push(Despawn(self.id))
+    }
+
+    pub fn spawn_child<T: GameObject>(&mut self, child: T, position: Vec2) -> &mut Self {
+        self.push(SpawnRelated::new(self.id, child, position))
+    }
+}
+
+trait GetState {
+    fn get_state(&self) -> &GameObjectState;
+
+    fn hovered(&self) -> bool {
+        self.get_state().hovered
+    }
+
+    fn position(&self) -> Vec2 {
+        self.get_state().position
+    }
+}
+
+impl GetState for ObjectContextMut<'_, '_> {
+    #[inline(always)]
+    fn get_state(&self) -> &GameObjectState {
+        self.state
+    }
+}
+
+impl GetState for ObjectContext<'_> {
+    #[inline(always)]
+    fn get_state(&self) -> &GameObjectState {
+        self.state
+    }
+}
+
+pub struct ObjectContext<'a> {
+    state: &'a GameObjectState,
+    id: ObjectId,
+}
+
+impl<'a> ObjectContext<'a> {
+    pub fn new(state: &'a GameObjectState, id: ObjectId) -> Self {
+        Self { state, id }
+    }
+}
+
+pub trait ObjectCommand: 'static {
+    fn apply(&mut self, objects: &mut GameObjects, simulation: &mut Simulation);
+}
+
+struct MoveBy(ObjectId, Vec2);
+
+impl ObjectCommand for MoveBy {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation) {
+        objects.move_by(self.0, self.1);
+    }
+}
+
+struct Despawn(ObjectId);
+
+impl ObjectCommand for Despawn {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation) {
+        objects.despawn(self.0);
+    }
+}
+
+struct SpawnRelated<C: GameObject>(ObjectId, Option<C>, Vec2);
+
+impl<C: GameObject> SpawnRelated<C> {
+    pub fn new(id: ObjectId, object: C, position: Vec2) -> Self {
+        Self(id, Some(object), position)
+    }
+}
+
+impl<C: GameObject> ObjectCommand for SpawnRelated<C> {
+    fn apply(&mut self, objects: &mut GameObjects, simulation: &mut Simulation) {
+        objects.insert_child(self.0, self.1.take().unwrap(), self.2, simulation);
+    }
 }
 
 impl GameObjects {
@@ -155,21 +466,24 @@ impl GameObjects {
         None
     }
 
+    pub fn insert_child<O: GameObject + 'static>(
+        &mut self,
+        parent: ObjectId,
+        child: O,
+        position: Vec2,
+        simulation: &mut Simulation,
+    ) -> ObjectId {
+        let child = self.insert(child, position, simulation);
+        self.hierarchy.set_parent(child, parent).unwrap();
+        child
+    }
+
     pub fn insert<O: GameObject + 'static>(
         &mut self,
         mut object: O,
         position: Vec2,
-        simulation: &Simulation,
+        simulation: &mut Simulation,
     ) -> ObjectId {
-        let mut state = GameObjectState {
-            position,
-            draw_priority: 0,
-            shape: None,
-            should_despawn: false,
-        };
-
-        object.start(&mut state, simulation, self);
-
         let mut slot = self.objects.reserve();
 
         let (meta, marker) = object.make_oid_meta();
@@ -181,9 +495,28 @@ impl GameObjects {
             id,
         });
 
+        let mut state = GameObjectState {
+            position,
+            draw_priority: 0,
+            shape: None,
+            hovered: false,
+        };
+
+        let mut buffer = CommandBuffer::default();
+
+        let mut ctx: ObjectContextMut = ObjectContextMut::new(&mut state, id, &mut buffer);
+
+        slot.slot
+            .as_mut()
+            .unwrap()
+            .object
+            .start(&mut ctx, simulation);
+
         let state_id = self.state.push(state);
 
         debug_assert_eq!(id.0, state_id);
+
+        buffer.apply(self, simulation);
 
         id
     }
@@ -206,37 +539,63 @@ impl GameObjects {
     }
 
     pub fn update(&mut self, simulation: &mut Simulation, camera: &mut Camera) {
-        let mut despawned = Vec::new();
+        let mut buffer = CommandBuffer::default();
 
-        for (object, state) in self.objects.iter_mut().zip(self.state.iter_mut()) {
-            object.object.update(state, simulation, camera);
-            if state.should_despawn {
-                despawned.push(object.id);
-            }
+        for (id, object, state) in self.iter_mut() {
+            let mut ctx = ObjectContextMut::new(state, id, &mut buffer);
+            object.update(&mut ctx, simulation, camera);
         }
 
-        for id in despawned {
-            self.objects.remove(id.0);
-            self.state.remove(id.0);
-        }
+        buffer.apply(self, simulation);
+    }
+
+    pub fn despawn(&mut self, id: ObjectId) {
+        self.objects.remove(id.0);
+        self.state.remove(id.0);
+        self.hierarchy.remove_recursively(id);
     }
 
     pub fn render(&self, simulation: &Simulation) {
-        let mut objects = self
-            .objects
+        let mut objects = self.iter().collect::<Vec<_>>();
+
+        objects.sort_by(|(_, _, a), (_, _, b)| a.draw_priority.cmp(&b.draw_priority));
+
+        for (id, object, state) in objects.into_iter() {
+            object.render(&ObjectContext::new(state, id), simulation, &self)
+        }
+    }
+
+    pub fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (ObjectId, &mut dyn GameObject, &mut GameObjectState)> {
+        self.objects
+            .iter_mut()
+            .zip(self.state.iter_mut())
+            .map(|(object, state)| (object.id, &mut *object.object, state))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ObjectId, &dyn GameObject, &GameObjectState)> {
+        self.objects
             .iter()
             .zip(self.state.iter())
-            .collect::<Vec<_>>();
+            .map(|(object, state)| (object.id, &*object.object, state))
+    }
 
-        objects.sort_by(|(_, a), (_, b)| a.draw_priority.cmp(&b.draw_priority));
+    /// Moves an object by `offset`. Also propagates the movement to all its children.
+    fn move_by(&mut self, object: ObjectId, offset: Vec2) {
+        self.state.get_mut(object.0).unwrap().position += offset;
 
-        for (object, state) in objects.into_iter() {
-            object.object.render(state, simulation, &self)
+        let Some(children) = self.hierarchy.get_children(object) else {
+            return;
+        };
+
+        for child in children {
+            self.state.get_mut(child.0).unwrap().position += offset;
         }
     }
 }
 
-enum Shape {
+pub enum Shape {
     Rectangle(Rect),
     Circle(Circle),
 }
@@ -250,64 +609,60 @@ impl Shape {
     }
 }
 
-struct GameObjectState {
+pub struct GameObjectState {
     position: Vec2,
     shape: Option<Shape>,
     /// Objects with higher draw priority are drawn ***later***, thus above objects with a lower priority.
     /// Mind that, within a priority group, there is no guarantee about draw ordering.
     draw_priority: usize,
-    should_despawn: bool,
+    hovered: bool,
 }
 
-impl GameObjectState {
-    pub fn despawn(&mut self) {
-        self.should_despawn = true;
-    }
-}
-
-trait GameObject {
+pub trait GameObject: 'static {
     #[allow(unused)]
-    fn start(
-        &mut self,
-        state: &mut GameObjectState,
-        simulation: &Simulation,
-        objects: &mut GameObjects,
-    ) {
-    }
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, objects: &GameObjects);
+    fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {}
+    fn render(&self, context: &ObjectContext, simulation: &Simulation, objects: &GameObjects);
     #[allow(unused)]
     fn update(
         &mut self,
-        state: &mut GameObjectState,
+        state: &mut ObjectContextMut,
         simulation: &mut Simulation,
         camera: &mut Camera,
     ) {
     }
+
+    #[allow(unused)]
+    fn on_mouse_enter(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {}
+
+    #[allow(unused)]
+    fn on_mouse_exit(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {}
+
+    #[allow(unused)]
+    fn on_click(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {}
+
+    #[allow(unused)]
+    fn on_click_released(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {}
+
     fn make_oid_meta(&self) -> (usize, u8) {
         (0, 0)
     }
 }
 
 impl GameObject for ChipId {
-    fn start(
-        &mut self,
-        state: &mut GameObjectState,
-        simulation: &Simulation,
-        objects: &mut GameObjects,
-    ) {
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
         let instance = simulation.chips.get(*self).unwrap();
 
         for (pos, pin) in instance.pins_as_positions() {
             let offset = pos.get_pin_tile_offset(instance.size);
 
-            objects.insert(pin, state.position + offset, simulation);
+            ctx.spawn_child(pin, ctx.position() + offset);
         }
     }
 
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, _: &GameObjects) {
+    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let instance = simulation.chips.get(*self).unwrap();
         let size = instance.size.as_vec2() * TILE_SIZE;
-        let position = state.position;
+        let position = state.position();
 
         draw_rectangle(position.x, position.y, size.x, size.y, DARKGRAY);
         draw_rectangle_lines(position.x, position.y, size.x, size.y, 1., BLACK);
@@ -331,19 +686,19 @@ impl TryFrom<ObjectId> for ChipId {
 }
 
 impl GameObject for PinId {
-    fn start(&mut self, state: &mut GameObjectState, _: &Simulation, _: &mut GameObjects) {
-        state.draw_priority = 2;
+    fn start(&mut self, state: &mut ObjectContextMut, _: &Simulation) {
+        state.set_draw_priority(2);
 
-        state.shape = Some(Shape::Circle(Circle {
-            x: state.position.x,
-            y: state.position.y,
+        state.set_shape(Shape::Circle(Circle {
+            x: state.position().x,
+            y: state.position().y,
             r: TILE_SIZE / 4.,
         }));
     }
 
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, _: &GameObjects) {
+    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let on_state = simulation.pins.get_state(*self).unwrap();
-        let position = state.position;
+        let position = state.position();
 
         let color = if on_state { RED } else { LIGHTGRAY };
 
@@ -393,7 +748,7 @@ impl GameObject for PinId {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct InvalidMarker;
+pub struct InvalidMarker;
 
 impl TryFrom<ObjectId> for PinId {
     type Error = InvalidMarker;
@@ -408,17 +763,22 @@ impl TryFrom<ObjectId> for PinId {
 }
 
 impl GameObject for NetworkId {
-    fn start(&mut self, state: &mut GameObjectState, _: &Simulation, _: &mut GameObjects) {
-        state.draw_priority = 1;
+    fn start(&mut self, state: &mut ObjectContextMut, _: &Simulation) {
+        state.set_draw_priority(1);
     }
 
-    fn update(&mut self, state: &mut GameObjectState, simulation: &mut Simulation, _: &mut Camera) {
+    fn update(
+        &mut self,
+        state: &mut ObjectContextMut,
+        simulation: &mut Simulation,
+        _: &mut Camera,
+    ) {
         if simulation.networks.get(*self).is_none() {
             state.despawn();
         }
     }
 
-    fn render(&self, _: &GameObjectState, simulation: &Simulation, objects: &GameObjects) {
+    fn render(&self, _: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         let network = simulation.networks.get(*self).unwrap();
 
         let color = if network.state { RED } else { GREEN };
@@ -447,33 +807,28 @@ impl TryFrom<ObjectId> for NetworkId {
     }
 }
 
-struct LedRenderer(pub ChipId, pub Color);
+struct LedObj(pub ChipId, pub Color);
 
-impl LedRenderer {
+impl LedObj {
     pub fn new(chip: ChipId, color: Color) -> Self {
         Self(chip, color)
     }
 }
 
-impl GameObject for LedRenderer {
-    fn start(
-        &mut self,
-        state: &mut GameObjectState,
-        simulation: &Simulation,
-        objects: &mut GameObjects,
-    ) {
+impl GameObject for LedObj {
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
         let instance = simulation.chips.get(self.0).unwrap();
 
-        let (pos, pin) = instance.pins_as_positions().next().unwrap();
+        let (_pos, pin) = instance.pins_as_positions().next().unwrap();
 
-        objects.insert(pin, state.position - vec2(TILE_SIZE, 0.), simulation);
+        ctx.spawn_child(pin, ctx.position() - vec2(TILE_SIZE, 0.));
     }
 
     fn make_oid_meta(&self) -> (usize, u8) {
         (self.0.0, 4)
     }
 
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, objects: &GameObjects) {
+    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let chip = simulation.chips.get(self.0).unwrap();
         let pin = chip.get_pinid(Pin::Left(0)).unwrap();
 
@@ -489,14 +844,14 @@ impl GameObject for LedRenderer {
             Color::from_rgba(255, 255, 255, 100)
         };
 
-        let pos = state.position;
+        let pos = state.position();
 
         draw_circle(pos.x, pos.y, TILE_SIZE, color);
         draw_circle_lines(pos.x, pos.y, TILE_SIZE, 1., BLACK);
     }
 }
 
-struct Camera {
+pub struct Camera {
     camera: Camera2D,
     zoom_factor: f32,
 }
@@ -514,7 +869,7 @@ impl Default for Camera {
 }
 
 impl Camera {
-    fn update(&mut self) {
+    pub fn update(&mut self) {
         if input::is_key_pressed(KeyCode::KpAdd) {
             self.zoom_by(0.1);
         } else if input::is_key_pressed(KeyCode::KpSubtract) {
@@ -560,6 +915,12 @@ impl Camera {
         set_camera(&self.camera);
     }
 
+    pub fn get_mouse_world_pos(&self) -> Vec2 {
+        let screen_pos = input::mouse_position();
+        self.camera
+            .screen_to_world(vec2(screen_pos.0, screen_pos.1))
+    }
+
     fn zoom_by(&mut self, by: f32) {
         self.zoom_factor += by;
         if self.zoom_factor <= 0. {
@@ -579,40 +940,6 @@ async fn main() {
     camera.update();
 
     let mut game = Game::default();
-
-    // let random = simulation.place_chip(RandomNxN::new(16));
-    // gameobjects.insert(random, vec2(100., 100.), &simulation);
-
-    // let nand = simulation.place_chip(Nand::new(3));
-    // gameobjects.insert(nand, vec2(600., 100.), &simulation);
-
-    // let counter = simulation.place_chip(Counter8b::default());
-    // gameobjects.insert(counter, vec2(600., 400.), &simulation);
-
-    // for i in 0..3 {
-    //     simulation.connect(random, Pin::Right(i), random, Pin::Right(i + 1));
-    //     simulation.connect(nand, Pin::Left(i), nand, Pin::Left(i + 1));
-    // }
-
-    // simulation
-    //     .connect(random, Pin::Right(0), nand, Pin::Left(0))
-    //     .unwrap();
-    // let (clock, _) = game.place_chip(Clock::new(5), vec2(100., 100.), ());
-
-    // let (counter, _) = game.place_chip(Counter8b::default(), vec2(300., 100.), ());
-
-    // game.simulation
-    //     .connect(clock, Pin::Right(1), counter, Pin::Left(4));
-
-    // let (counter2, _) = game.place_chip(Counter8b::default(), vec2(300., 250.), ());
-
-    // game.simulation
-    //     .connect(counter, Pin::Right(7), counter2, Pin::Left(4));
-
-    // let (led, _) = game.place_chip(Led, vec2(500., 100.), RED);
-
-    // game.simulation
-    //     .connect(counter, Pin::Right(5), led, Pin::Left(0));
 
     let [cpu, high, clock] = game.place_chips((
         (CPU::default(), vec2(100., 100.)),
@@ -689,17 +1016,15 @@ async fn main() {
         }
 
         // sync newly created networks, if any.
-        for network in game.simulation.networks.ids() {
+        for network in game.simulation.networks.ids().collect::<Vec<_>>() {
             if game.game_objects.find_by_meta(&network).is_none() {
                 game.game_objects
-                    .insert(network, vec2(0., 0.), &game.simulation);
+                    .insert(network, vec2(0., 0.), &mut game.simulation);
             }
         }
 
-        camera.update();
-
-        game.game_objects.update(&mut game.simulation, &mut camera);
-        game.game_objects.render(&game.simulation);
+        game.update();
+        game.render();
 
         draw_fps();
 
@@ -876,34 +1201,29 @@ impl Chip for NumericDisplay {
     fn update(&mut self, _: &mut PinsState) {}
 }
 
-struct NumericDisplayRenderer(ChipId);
+struct NumericDisplayObj(ChipId);
 
-impl From<ChipId> for NumericDisplayRenderer {
+impl From<ChipId> for NumericDisplayObj {
     fn from(value: ChipId) -> Self {
         Self(value)
     }
 }
 
-impl GameObject for NumericDisplayRenderer {
-    fn start(
-        &mut self,
-        state: &mut GameObjectState,
-        simulation: &Simulation,
-        objects: &mut GameObjects,
-    ) {
+impl GameObject for NumericDisplayObj {
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
         let instance = simulation.chips.get(self.0).unwrap();
 
         for (pos, pin) in instance.pins_as_positions() {
             let offset = pos.get_pin_tile_offset(instance.size);
 
-            objects.insert(pin, state.position + offset, simulation);
+            ctx.spawn_child(pin, ctx.position() + offset);
         }
     }
 
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, objects: &GameObjects) {
+    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let instance = simulation.chips.get(self.0).unwrap();
         let size = instance.size.as_vec2() * TILE_SIZE;
-        let position = state.position;
+        let position = state.position();
 
         draw_rectangle(position.x, position.y, size.x, size.y, DARKGRAY);
         draw_rectangle_lines(position.x, position.y, size.x, size.y, 1., BLACK);
@@ -914,9 +1234,10 @@ impl GameObject for NumericDisplayRenderer {
             .enumerate()
             .filter_map(|(index, &id)| id.map(|id| (index, id)))
             .filter_map(|(index, id)| {
-                simulation.networks.get_network(id).and_then(|network| {
-                    (simulation.networks.get_state(network).map(|n| (index, n)))
-                })
+                simulation
+                    .networks
+                    .get_network(id)
+                    .and_then(|network| simulation.networks.get_state(network).map(|n| (index, n)))
             })
             .map(|(index, state)| (state.is_high() as u8) << index)
             .fold(0_u8, |acc, item| acc & item);

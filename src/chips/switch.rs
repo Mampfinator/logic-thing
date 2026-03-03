@@ -1,16 +1,16 @@
 use std::iter;
 
 use macroquad::{
-    color::{BLACK, ORANGE, RED, WHITE},
+    color::{BLACK, RED, WHITE},
     input,
     math::{Rect, uvec2, vec2},
     shapes::draw_rectangle,
 };
 
-use crate::impl_mgo;
+use crate::{GetState, ObjectContext, ObjectContextMut, impl_mgo};
 
 use crate::{
-    Camera, GameObject, GameObjectState, GameObjects, Shape, TILE_SIZE,
+    Camera, GameObject, GameObjects, TILE_SIZE,
     simulation::{Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation},
 };
 
@@ -32,10 +32,10 @@ impl Chip for Switch {
         )
     }
 
-    fn update(&mut self, state: &mut PinsState) {}
+    fn update(&mut self, _state: &mut PinsState) {}
 }
 
-impl_mgo!(Switch as SwitchObj where Args: (usize));
+impl_mgo!(Switch as SwitchObj where Args = (usize));
 
 pub struct SwitchObj {
     chip: ChipId,
@@ -52,18 +52,13 @@ impl SwitchObj {
 }
 
 impl GameObject for SwitchObj {
-    fn start(
-        &mut self,
-        state: &mut GameObjectState,
-        simulation: &Simulation,
-        objects: &mut GameObjects,
-    ) {
-        self.chip.start(state, simulation, objects);
+    fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {
+        self.chip.start(state, simulation);
     }
 
     fn update(
         &mut self,
-        state: &mut GameObjectState,
+        state: &mut ObjectContextMut,
         simulation: &mut Simulation,
         camera: &mut Camera,
     ) {
@@ -75,7 +70,7 @@ impl GameObject for SwitchObj {
         let mouse_pos = camera.camera.screen_to_world(vec2(pos.0, pos.1));
 
         for (switch, switch_state) in self.switches.iter_mut().enumerate() {
-            let pos = state.position + vec2(TILE_SIZE / 2., TILE_SIZE * switch as f32 + 1.);
+            let pos = state.position() + vec2(TILE_SIZE / 2., TILE_SIZE * switch as f32 + 1.);
 
             if Rect::new(pos.x, pos.y, TILE_SIZE * 2., TILE_SIZE - 2.).contains(mouse_pos) {
                 *switch_state = !*switch_state;
@@ -86,10 +81,10 @@ impl GameObject for SwitchObj {
         }
     }
 
-    fn render(&self, state: &GameObjectState, simulation: &Simulation, objects: &GameObjects) {
+    fn render(&self, state: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         self.chip.render(state, simulation, objects);
         for (switch, switch_state) in self.switches.iter().copied().enumerate() {
-            let switch_pos = state.position + vec2(TILE_SIZE, TILE_SIZE * switch as f32 + 1.);
+            let switch_pos = state.position() + vec2(TILE_SIZE, TILE_SIZE * switch as f32 + 1.);
             let color = if switch_state { RED } else { BLACK };
 
             let switch_x = if switch_state { TILE_SIZE * 1.5 } else { 0. };
