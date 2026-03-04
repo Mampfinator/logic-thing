@@ -1,5 +1,3 @@
-use std::iter;
-
 use macroquad::{
     color::{BLACK, RED, WHITE},
     input,
@@ -10,7 +8,7 @@ use macroquad::{
 use crate::{GetState, ObjectContext, ObjectContextMut, impl_mgo};
 
 use crate::{
-    Camera, GameObject, GameObjects, TILE_SIZE,
+    GameObject, GameObjects, TILE_SIZE,
     simulation::{Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation},
 };
 
@@ -37,6 +35,7 @@ impl Chip for Switch {
 
 impl_mgo!(Switch as SwitchObj where Args = (usize));
 
+#[derive(Hash)]
 pub struct SwitchObj {
     chip: ChipId,
     switches: Vec<bool>,
@@ -46,28 +45,22 @@ impl SwitchObj {
     pub fn new(chip: ChipId, switches: usize) -> Self {
         Self {
             chip,
-            switches: iter::repeat(false).take(switches).collect(),
+            switches: std::iter::repeat_n(false, switches).collect(),
         }
     }
 }
 
 impl GameObject for SwitchObj {
-    fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {
-        self.chip.start(state, simulation);
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
+        self.chip.start(ctx, simulation);
     }
 
-    fn update(
-        &mut self,
-        state: &mut ObjectContextMut,
-        simulation: &mut Simulation,
-        camera: &mut Camera,
-    ) {
+    fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {
         if !input::is_mouse_button_pressed(input::MouseButton::Left) {
             return;
         }
 
-        let pos = input::mouse_position();
-        let mouse_pos = camera.camera.screen_to_world(vec2(pos.0, pos.1));
+        let mouse_pos = state.mouse_world_pos();
 
         for (switch, switch_state) in self.switches.iter_mut().enumerate() {
             let pos = state.position() + vec2(TILE_SIZE / 2., TILE_SIZE * switch as f32 + 1.);

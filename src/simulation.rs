@@ -17,8 +17,8 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn place_chip<T: Chip + 'static>(&mut self, chip: T) -> ChipId {
-        let id = self.chips.register(&mut self.pins, chip);
-        id
+        
+        self.chips.register(&mut self.pins, chip)
     }
 
     pub fn tick(&mut self) {
@@ -55,9 +55,13 @@ impl Simulation {
         Some(())
     }
 
+    pub fn toggle_connect_by_pinid(&mut self, a: PinId, b: PinId) {
+        self.networks.toggle_connect(a, b);
+    }
+
     pub fn remove_chip(&mut self, chip: ChipId) {
         let chip = self.chips.chips.remove(chip.0).unwrap();
-        for pin in chip.pins.into_iter().filter_map(|p| p) {
+        for pin in chip.pins.into_iter().flatten() {
             self.pins.pins.remove(pin.0);
             self.networks.remove_pin(pin);
         }
@@ -164,8 +168,6 @@ impl Pins {
             let id = pin_def.clone().map(|def| self.register(id, def));
             pins.push(id);
         }
-
-        println!("Pins for {id:?}: {:?}", pins);
 
         pins
     }
@@ -366,7 +368,7 @@ pub struct PinLayout {
 
 impl PinLayout {
     pub fn new(x: usize, y: usize) -> Self {
-        let state = vec![None; 2 * x as usize + 2 * y as usize];
+        let state = vec![None; 2 * x + 2 * y];
 
         Self {
             size: uvec2(x as u32, y as u32),
@@ -567,19 +569,17 @@ impl<T> StableVec<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.buffer
             .iter()
-            .filter(|slot| slot.is_some())
-            .map(|slot| slot.as_ref().unwrap())
+            .filter_map(|slot| slot.as_ref())
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.buffer
             .iter_mut()
-            .filter(|slot| slot.is_some())
-            .map(|slot| slot.as_mut().unwrap())
+            .filter_map(|slot| slot.as_mut())
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetworkId(pub usize);
 
 pub struct Network {
@@ -672,7 +672,7 @@ impl NetworkPins {
             new_data.push(data);
         }
 
-        if new_data.len() > 0 {
+        if !new_data.is_empty() {
             Some(GraphMutationResult::CreateNetworks(new_data))
         } else {
             None

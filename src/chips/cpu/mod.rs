@@ -70,8 +70,7 @@ impl Chip for CPU {
                         (IRQ, PinDef::new("IRQ")),
                         (CLK, PinDef::new("CLK")),
                         (RW, PinDef::new("RW")),
-                    ]
-                    .into_iter(),
+                    ],
                 ),
         )
     }
@@ -90,7 +89,6 @@ impl Chip for CPU {
                 state.set(ADDRESS_PINS[index], bit);
             }
             self.program_counter = self.program_counter.wrapping_add(1);
-            return;
         } else if clock.is_falling_edge() {
             let Some(instruction) = self
                 .state
