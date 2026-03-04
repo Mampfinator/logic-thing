@@ -64,14 +64,12 @@ impl Chip for CPU {
                         .enumerate()
                         .map(|(i, pin)| (pin, PinDef::new(format!("A{i}")))),
                 )
-                .chain(
-                    [
-                        (CE, PinDef::new("CE")),
-                        (IRQ, PinDef::new("IRQ")),
-                        (CLK, PinDef::new("CLK")),
-                        (RW, PinDef::new("RW")),
-                    ],
-                ),
+                .chain([
+                    (CE, PinDef::new("CE")),
+                    (IRQ, PinDef::new("IRQ")),
+                    (CLK, PinDef::new("CLK")),
+                    (RW, PinDef::new("RW")),
+                ]),
         )
     }
     fn update(&mut self, state: &mut PinsState) {

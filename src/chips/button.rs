@@ -6,8 +6,7 @@ use macroquad::{
 };
 
 use crate::{
-    GameObject, GameObjects, GetState, ObjectContext, ObjectContextMut, TILE_SIZE,
-    impl_mgo,
+    GameObject, GameObjects, GetState, ObjectContext, ObjectContextMut, TILE_SIZE, impl_mgo,
     simulation::{self, Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation},
 };
 

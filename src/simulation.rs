@@ -17,7 +17,6 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn place_chip<T: Chip + 'static>(&mut self, chip: T) -> ChipId {
-        
         self.chips.register(&mut self.pins, chip)
     }
 
@@ -567,15 +566,11 @@ impl<T> StableVec<T> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.buffer
-            .iter()
-            .filter_map(|slot| slot.as_ref())
+        self.buffer.iter().filter_map(|slot| slot.as_ref())
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.buffer
-            .iter_mut()
-            .filter_map(|slot| slot.as_mut())
+        self.buffer.iter_mut().filter_map(|slot| slot.as_mut())
     }
 }
 
