@@ -27,11 +27,11 @@ pub mod simulation;
 use chips::cpu::{CPU, DATA_PINS};
 
 #[derive(Default)]
-pub struct Resources {
+pub struct TypeMap {
     resources: HashMap<TypeId, Box<dyn Any>>,
 }
 
-impl Resources {
+impl TypeMap {
     pub fn insert_default<T: Default + 'static>(&mut self) -> Option<T> {
         self.insert(T::default())
     }
@@ -186,7 +186,7 @@ impl Hierarchy {
 struct Game {
     pub simulation: Simulation,
     pub game_objects: GameObjects,
-    pub resources: Resources,
+    pub resources: TypeMap,
 }
 
 impl Game {
@@ -365,11 +365,6 @@ impl_mgo!(
     CPU,
 );
 
-// TODO: custom metadata on GameObjectState?
-/// (barely) copy type storing object metadata.
-/// The first 64 bits are the index of the object in the internal vector, the next 64 can be arbitrary metadata,
-/// and the last 8 are a type identifier.
-/// This metadata is mainly used to find position data about other simulation objects during rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectId(usize);
 
@@ -393,7 +388,7 @@ impl CommandBuffer {
         &mut self,
         game_objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     ) {
         for mut command in self.commands.drain(0..) {
             command.apply(game_objects, simulation, resources)
@@ -405,7 +400,7 @@ pub struct ObjectContextMut<'a, 'b> {
     state: &'a mut GameObjectState,
     id: ObjectId,
     commands: &'b mut CommandBuffer,
-    resources: &'a mut Resources,
+    resources: &'a mut TypeMap,
 }
 
 impl<'a, 'b> ObjectContextMut<'a, 'b> {
@@ -413,7 +408,7 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
         state: &'a mut GameObjectState,
         id: ObjectId,
         commands: &'b mut CommandBuffer,
-        resources: &'a mut Resources,
+        resources: &'a mut TypeMap,
     ) -> Self {
         Self {
             state,
@@ -436,6 +431,34 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
 
     pub fn resource<T: 'static>(&self) -> Option<&T> {
         self.resources.get()
+    }
+
+    pub fn data<T: 'static>(&self) -> &T {
+        self.get_data().unwrap()
+    }
+
+    pub fn get_data<T: 'static>(&self) -> Option<&T> {
+        self.state.custom_data.get()
+    }
+
+    pub fn data_mut<T: 'static>(&mut self) -> &mut T {
+        self.get_data_mut().unwrap()
+    }
+
+    pub fn get_data_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.state.custom_data.get_mut()
+    }
+
+    pub fn data_mut_or_default<T: Default + 'static>(&mut self) -> &mut T {
+        self.state.custom_data.get_mut_or_insert_default()
+    }
+
+    pub fn delete_data<T: 'static>(&mut self) {
+        self.state.custom_data.delete::<T>();
+    }
+
+    pub fn insert_data<T: 'static>(&mut self, data: T) {
+        self.state.custom_data.insert(data);
     }
 
     pub fn push<C: ObjectCommand>(&mut self, command: C) -> &mut Self {
@@ -508,14 +531,14 @@ pub trait ObjectCommand: 'static {
         &mut self,
         objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     );
 }
 
 struct MoveBy(ObjectId, Vec2);
 
 impl ObjectCommand for MoveBy {
-    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut Resources) {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
         objects.move_by(self.0, self.1);
     }
 }
@@ -523,7 +546,7 @@ impl ObjectCommand for MoveBy {
 struct Despawn(ObjectId);
 
 impl ObjectCommand for Despawn {
-    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut Resources) {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
         objects.despawn(self.0);
     }
 }
@@ -541,7 +564,7 @@ impl<C: GameObject + Hash> ObjectCommand for SpawnRelated<C> {
         &mut self,
         objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     ) {
         objects.insert_child(
             self.0,
@@ -572,7 +595,7 @@ impl GameObjects {
         child: O,
         position: Vec2,
         simulation: &mut Simulation,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     ) -> ObjectId {
         let child = self.insert(child, position, simulation, resources);
         self.hierarchy.set_parent(child, parent).unwrap();
@@ -584,7 +607,7 @@ impl GameObjects {
         object: O,
         position: Vec2,
         simulation: &mut Simulation,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     ) -> ObjectId {
         let mut slot = self.objects.reserve();
 
@@ -606,6 +629,7 @@ impl GameObjects {
             draw_priority: 0,
             shape: None,
             hovered: false,
+            custom_data: TypeMap::default(),
         };
 
         let mut buffer = CommandBuffer::default();
@@ -650,7 +674,7 @@ impl GameObjects {
         &mut self,
         simulation: &mut Simulation,
         _camera: &mut Camera,
-        resources: &mut Resources,
+        resources: &mut TypeMap,
     ) {
         let mut buffer = CommandBuffer::default();
 
@@ -746,6 +770,7 @@ pub struct GameObjectState {
     /// Mind that, within a priority group, there is no guarantee about draw ordering.
     draw_priority: usize,
     hovered: bool,
+    custom_data: TypeMap,
 }
 
 pub trait GameObject: 'static {
@@ -788,16 +813,21 @@ impl GameObject for ChipId {
 
     fn on_click(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
         let mouse_pos = ctx.mouse_world_pos();
-        ctx.resource_mut::<ChipClickOffset>().unwrap().0 = ctx.position() - mouse_pos;
+        let offset = ChipClickOffset(ctx.position() - mouse_pos);
+        ctx.insert_data(offset);
+    }
+
+    fn on_click_released(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        ctx.delete_data::<ChipClickOffset>();
     }
 
     fn update(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
         if ctx.hovered()
+            && let Some(offset) = ctx.get_data::<ChipClickOffset>()
             && input::is_key_down(KeyCode::LeftAlt)
             && input::is_mouse_button_down(MouseButton::Left)
         {
             let mouse_pos = ctx.mouse_world_pos();
-            let offset = ctx.resource::<ChipClickOffset>().unwrap();
             ctx.move_by(mouse_pos - ctx.position() + offset.0);
         }
     }
@@ -841,7 +871,6 @@ impl GameObject for PinId {
 
         let pin = simulation.pins.get(*self).unwrap();
 
-        // TODO: text is very unreadable right now. It should probably be offset in the same direction the pin is relative to the chip.
         if let Some(ref text) = pin.label {
             // FIXME: this is really inefficient, since we need to traverse every chip's pin every time.
             let chip = simulation.chips.get(pin.chip).unwrap();
