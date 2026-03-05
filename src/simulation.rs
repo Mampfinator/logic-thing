@@ -37,20 +37,11 @@ impl Simulation {
         self.networks.update(&self.pins);
     }
 
-    pub fn connect(
-        &mut self,
-        chip_a: ChipId,
-        pin_a: Pin,
-        chip_b: ChipId,
-        pin_b: Pin,
-    ) -> Option<()> {
-        let chip_a = self.chips.get(chip_a)?;
-        let pin_a = chip_a.get_pinid(pin_a)?;
+    pub fn connect(&mut self, a: impl GetPinId, b: impl GetPinId) -> Option<()> {
+        let a = a.get_pinid(self)?;
+        let b = b.get_pinid(self)?;
 
-        let chip_b = self.chips.get(chip_b)?;
-        let pin_b = chip_b.get_pinid(pin_b)?;
-
-        self.networks.toggle_connect(pin_a, pin_b);
+        self.toggle_connect_by_pinid(a, b);
         Some(())
     }
 
@@ -963,6 +954,68 @@ impl Networks {
     }
 }
 
+pub trait GetPinId {
+    fn get_pinid(self, simulation: &Simulation) -> Option<PinId>;
+}
+
+impl GetPinId for PinId {
+    fn get_pinid(self, _: &Simulation) -> Option<PinId> {
+        Some(self)
+    }
+}
+
+impl<T: Into<ChipId>> GetPinId for (T, Pin) {
+    fn get_pinid(self, simulation: &Simulation) -> Option<PinId> {
+        let chip = simulation.chips.get(self.0.into())?;
+        chip.get_pinid(self.1)
+    }
+}
+
+impl<T: Into<ChipId>> GetPinId for (Pin, T) {
+    fn get_pinid(self, simulation: &Simulation) -> Option<PinId> {
+        let chip = simulation.chips.get(self.1.into())?;
+        chip.get_pinid(self.0)
+    }
+}
+
+impl<T: Into<ChipId>> GetPinId for (T, &str) {
+    fn get_pinid(self, simulation: &Simulation) -> Option<PinId> {
+        let chip_id = self.0.into();
+        simulation
+            .pins
+            .pins
+            .iter()
+            .find(|meta| {
+                meta.chip == chip_id
+                    && meta
+                        .label
+                        .as_ref()
+                        .map(|label| label == self.1)
+                        .unwrap_or(false)
+            })
+            .map(|pin| pin.id)
+    }
+}
+
+impl<T: Into<ChipId>> GetPinId for (&str, T) {
+    fn get_pinid(self, simulation: &Simulation) -> Option<PinId> {
+        let chip_id = self.1.into();
+        simulation
+            .pins
+            .pins
+            .iter()
+            .find(|meta| {
+                meta.chip == chip_id
+                    && meta
+                        .label
+                        .as_ref()
+                        .map(|label| label == self.0)
+                        .unwrap_or(false)
+            })
+            .map(|pin| pin.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use petgraph::prelude::StableUnGraph;
@@ -978,10 +1031,10 @@ mod tests {
         let a = simulation.place_chip(Nand::new(1));
         let b = simulation.place_chip(Nand::new(1));
 
-        simulation.connect(a, Pin::Left(0), a, Pin::Left(1));
-        simulation.connect(b, Pin::Left(0), b, Pin::Left(1));
+        simulation.connect((a, Pin::Left(0)), (a, Pin::Left(1)));
+        simulation.connect((b, Pin::Left(0)), (b, Pin::Left(1)));
 
-        simulation.connect(a, Pin::Left(0), b, Pin::Left(1));
+        simulation.connect((a, Pin::Left(0)), (b, Pin::Left(1)));
 
         assert_eq!(simulation.networks.networks.iter().count(), 1);
 

@@ -135,6 +135,12 @@ impl Game {
     }
 }
 
+impl From<(ChipId, ObjectId)> for ChipId {
+    fn from(value: (ChipId, ObjectId)) -> Self {
+        value.0
+    }
+}
+
 impl_mgo!(
     Clock,
     Counter8b,
@@ -458,11 +464,10 @@ async fn main() {
         (TieHigh, vec2(-25., 100.)),
     ));
 
-    game.simulation
-        .connect(cpu.0, Pin::Left(0), high.0, Pin::Right(0));
+    game.simulation.connect((cpu, "CE"), (high, "HIGH"));
 
     game.simulation
-        .connect(cpu.0, DATA_PINS[0], high.0, Pin::Right(0));
+        .connect((cpu, DATA_PINS[0]), (high, Pin::Right(0)));
 
     let mut rom = [0; 256];
     for i in 0..u8::MAX {
@@ -474,14 +479,11 @@ async fn main() {
         (TieHigh, vec2(348., 100. - TILE_SIZE)),
         (button::Button, vec2(348., 100.)),
     ));
-    game.simulation
-        .connect(cpu.0, Pin::Left(2), clock_button.0, Pin::Right(1));
+    game.simulation.connect((cpu, "CLK"), (clock_button, "OUT"));
 
-    game.simulation
-        .connect(high_2.0, Pin::Right(0), rom.0, Pin::Left(0));
+    game.simulation.connect((high_2, "HIGH"), (rom, "CE"));
 
-    game.simulation
-        .connect(clock_button.0, Pin::Right(0), rom.0, Pin::Right(0));
+    game.simulation.connect((clock_button, "CLK"), (rom, "CLK"));
 
     let [display_a, display_b] = game.place_chips((
         (NumericDisplay, vec2(700., 100.)),
@@ -490,11 +492,11 @@ async fn main() {
 
     for i in 0..8 {
         game.simulation
-            .connect(display_b.0, Pin::Top(i), rom.0, Pin::Right(i + 1));
+            .connect((display_b, Pin::Top(i)), (rom, Pin::Right(i + 1)));
         game.simulation
-            .connect(cpu.0, Pin::Right(i), rom.0, Pin::Right(i + 1));
+            .connect((cpu, Pin::Right(i)), (rom, Pin::Right(i + 1)));
         game.simulation
-            .connect(cpu.0, Pin::Left(i + 4), rom.0, Pin::Right(i + 1));
+            .connect((cpu, Pin::Left(i + 4)), (rom, Pin::Right(i + 1)));
     }
 
     for _ in 0.. {
