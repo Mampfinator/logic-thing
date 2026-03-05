@@ -422,7 +422,7 @@ impl Pin {
             0 => 0,                                     // right
             1 => size.x as usize,                       // bottom
             2 => size.x as usize + size.y as usize,     // left
-            3 => size.x as usize * 2 + size.y as usize, // top
+            3 => size.x as usize + size.y as usize * 2, // top
             _ => unreachable!(),
         };
 

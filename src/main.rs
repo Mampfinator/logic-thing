@@ -453,16 +453,13 @@ async fn main() {
     game.resources.insert_default::<PinSelection>();
     game.resources.insert_default::<ChipClickOffset>();
 
-    let [cpu, high, clock] = game.place_chips((
+    let [cpu, high] = game.place_chips((
         (CPU::default(), vec2(100., 100.)),
         (TieHigh, vec2(-25., 100.)),
-        (Clock::new(1), vec2(-25., 116.)),
     ));
 
     game.simulation
         .connect(cpu.0, Pin::Left(0), high.0, Pin::Right(0));
-    game.simulation
-        .connect(cpu.0, Pin::Left(2), clock.0, Pin::Right(1));
 
     game.simulation
         .connect(cpu.0, DATA_PINS[0], high.0, Pin::Right(0));
@@ -472,23 +469,33 @@ async fn main() {
         rom[i as usize] = i;
     }
 
-    let [rom, switches, high_2, button] = game.place_chips((
+    let [rom, high_2, clock_button] = game.place_chips((
         (rom::ROM::from(rom), vec2(500., 100.)),
-        (switch::Switch::new(8), vec2(300., 116.), 8),
         (TieHigh, vec2(348., 100. - TILE_SIZE)),
         (button::Button, vec2(348., 100.)),
     ));
-
-    for i in 0..8 {
-        game.simulation
-            .connect(rom.0, Pin::Left(i + 1), switches.0, Pin::Right(i));
-    }
+    game.simulation
+        .connect(cpu.0, Pin::Left(2), clock_button.0, Pin::Right(1));
 
     game.simulation
         .connect(high_2.0, Pin::Right(0), rom.0, Pin::Left(0));
 
     game.simulation
-        .connect(button.0, Pin::Right(0), rom.0, Pin::Right(0));
+        .connect(clock_button.0, Pin::Right(0), rom.0, Pin::Right(0));
+
+    let [display_a, display_b] = game.place_chips((
+        (NumericDisplay, vec2(700., 100.)),
+        (NumericDisplay, vec2(700., 200.)),
+    ));
+
+    for i in 0..8 {
+        game.simulation
+            .connect(display_b.0, Pin::Top(i), rom.0, Pin::Right(i + 1));
+        game.simulation
+            .connect(cpu.0, Pin::Right(i), rom.0, Pin::Right(i + 1));
+        game.simulation
+            .connect(cpu.0, Pin::Left(i + 4), rom.0, Pin::Right(i + 1));
+    }
 
     for _ in 0.. {
         clear_background(SKYBLUE);
@@ -697,8 +704,8 @@ struct NumericDisplay;
 impl Chip for NumericDisplay {
     fn setup(&self) -> PinLayout {
         PinLayout::new_with(
-            uvec2(4, 8),
-            (0..7).map(|idx| (Pin::Left(idx), PinDef::new(format!("C{idx}")))),
+            uvec2(8, 4),
+            (0..8).map(|idx| (Pin::Top(idx), PinDef::new(format!("C{idx}")))),
         )
     }
 
@@ -716,37 +723,51 @@ impl From<ChipId> for NumericDisplayObj {
 
 impl GameObject for NumericDisplayObj {
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
-        let instance = simulation.chips.get(self.0).unwrap();
-
-        for (pos, pin) in instance.pins_as_positions() {
-            let offset = pos.get_pin_tile_offset(instance.size);
-
-            ctx.spawn_child(pin, ctx.position() + offset);
-        }
+        self.0.start(ctx, simulation);
     }
 
-    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
-        let instance = simulation.chips.get(self.0).unwrap();
-        let size = instance.size.as_vec2() * TILE_SIZE;
-        let position = state.position();
+    fn on_click(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_click(ctx, simulation);
+    }
 
-        draw_rectangle(position.x, position.y, size.x, size.y, DARKGRAY);
-        draw_rectangle_lines(position.x, position.y, size.x, size.y, 1., BLACK);
+    fn on_click_released(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_click_released(ctx, simulation);
+    }
+
+    fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.update(state, simulation);
+    }
+
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
+        self.0.render(ctx, simulation, objects);
+
+        let instance = simulation.chips.get(self.0).unwrap();
 
         let number = instance
             .pins
             .iter()
+            .filter_map(|pin| *pin)
             .enumerate()
-            .filter_map(|(index, &id)| id.map(|id| (index, id)))
             .filter_map(|(index, id)| {
                 simulation
                     .networks
                     .get_network(id)
                     .and_then(|network| simulation.networks.get_state(network).map(|n| (index, n)))
             })
-            .map(|(index, state)| (state.is_high() as u8) << index)
-            .fold(0_u8, |acc, item| acc & item);
+            .fold(0_u8, |acc, (index, state)| {
+                acc | (state.is_high() as u8) << index
+            });
 
-        println!("{number}");
+        let text = format!("{}", number);
+
+        let chip_center = ctx.position() + instance.size.as_vec2() * TILE_SIZE / 2.;
+
+        draw_text(
+            &text,
+            ctx.position().x + TILE_SIZE,
+            chip_center.y + 12.,
+            56.,
+            WHITE,
+        );
     }
 }

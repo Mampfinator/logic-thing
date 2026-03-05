@@ -50,6 +50,7 @@ impl SwitchObj {
     }
 }
 
+// TODO: make individual switches GameObjects for easier handling.
 impl GameObject for SwitchObj {
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
         self.chip.start(ctx, simulation);
