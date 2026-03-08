@@ -1,5 +1,8 @@
 use core::f32;
-use std::hash::{Hash, Hasher};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+};
 
 use macroquad::{input, prelude::*};
 
@@ -132,7 +135,7 @@ impl Game {
     }
 
     pub fn render(&self) {
-        self.game_objects.render(&self.simulation);
+        self.game_objects.render(&self.simulation, &self.resources);
     }
 }
 
@@ -192,6 +195,16 @@ impl GameObject for PinId {
         }
     }
 
+    fn update(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        if ctx.hovered() {
+            ctx.resource_mut::<HoveredPins>().set([*self].into_iter());
+        }
+    }
+
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        ctx.resource_mut::<HoveredPins>().remove_one(*self);
+    }
+
     fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let on_state = simulation.pins.get_state(*self).unwrap();
         let position = state.position();
@@ -234,19 +247,34 @@ impl GameObject for NetworkId {
         }
     }
 
-    fn render(&self, _: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
-        let network = simulation.networks.get(*self).unwrap();
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
+        let highlight_pins = ctx.resource::<HoveredPins>();
 
-        let color = if network.state {
-            Color::new(0.7, 0.1, 0.1, 0.7)
-        } else {
-            Color::new(0.1, 0.7, 0.1, 0.7)
-        };
+        let network = simulation.networks.get(*self).unwrap();
 
         for (a, b) in network.iter_connections() {
             let pos_a = objects.find_state(&a).unwrap().position;
             let pos_b = objects.find_state(&b).unwrap().position;
-            draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, 2., color);
+
+            let alpha = if highlight_pins.contains_either(a, b) {
+                0.9
+            } else {
+                0.5
+            };
+
+            let color = if network.state {
+                Color::new(0.7, 0.1, 0.1, alpha)
+            } else {
+                Color::new(0.1, 0.7, 0.1, alpha)
+            };
+
+            let thickness = if highlight_pins.contains_either(a, b) {
+                4.
+            } else {
+                2.
+            };
+
+            draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, thickness, color);
         }
     }
 }
@@ -279,6 +307,14 @@ impl GameObject for LedObj {
         ctx.spawn_child(pin, ctx.position() - vec2(TILE_SIZE, 0.));
     }
 
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_mouse_exit(ctx, simulation);
+    }
+
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.update(ctx, simulation);
+    }
+
     fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let chip = simulation.chips.get(self.0).unwrap();
         let pin = chip.get_pinid(Pin::Left(0)).unwrap();
@@ -299,6 +335,30 @@ impl GameObject for LedObj {
 
         draw_circle(pos.x, pos.y, TILE_SIZE, color);
         draw_circle_lines(pos.x, pos.y, TILE_SIZE, 1., BLACK);
+    }
+}
+
+#[derive(Default)]
+struct HoveredPins {
+    pins: HashSet<PinId>,
+}
+
+impl HoveredPins {
+    pub fn clear(&mut self) {
+        self.pins.clear()
+    }
+
+    pub fn remove_one(&mut self, pin: PinId) {
+        self.pins.remove(&pin);
+    }
+
+    pub fn set<T: Iterator<Item = PinId>>(&mut self, items: T) {
+        self.pins.clear();
+        self.pins.extend(items);
+    }
+
+    pub fn contains_either(&self, a: PinId, b: PinId) -> bool {
+        self.pins.contains(&a) || self.pins.contains(&b)
     }
 }
 
@@ -430,7 +490,17 @@ impl GameObject for ChipId {
         ctx.delete_data::<ChipClickOffset>();
     }
 
-    fn update(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        ctx.resource_mut::<HoveredPins>().clear();
+    }
+
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        if ctx.hovered() {
+            let chip = simulation.chips.get(*self).unwrap();
+            let hovered = ctx.resource_mut::<HoveredPins>();
+            hovered.set(chip.pins.iter().filter_map(|p| *p))
+        }
+
         if let Some(offset) = ctx.get_data::<ChipClickOffset>() {
             let mouse_pos = ctx.mouse_world_pos();
             ctx.move_by(mouse_pos - ctx.position() + offset.0);
@@ -465,6 +535,7 @@ async fn main() {
     let mut game = Game::default();
 
     game.resources.insert_default::<PinSelection>();
+    game.resources.insert_default::<HoveredPins>();
 
     game.game_objects.insert(
         Grid {
@@ -746,6 +817,10 @@ impl GameObject for NumericDisplayObj {
 
     fn on_click_released(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
         self.0.on_click_released(ctx, simulation);
+    }
+
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_mouse_exit(ctx, simulation);
     }
 
     fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {

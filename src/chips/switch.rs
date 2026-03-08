@@ -119,6 +119,10 @@ impl GameObject for SwitchChip {
         self.chip.on_click_released(ctx, simulation);
     }
 
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.chip.on_mouse_exit(ctx, simulation);
+    }
+
     fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
         self.chip.update(ctx, simulation);
     }

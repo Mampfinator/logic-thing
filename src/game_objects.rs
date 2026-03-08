@@ -434,12 +434,23 @@ impl GetState for ObjectContext<'_> {
 
 pub struct ObjectContext<'a> {
     state: &'a GameObjectState,
+    resources: &'a TypeMap,
     id: ObjectId,
 }
 
 impl<'a> ObjectContext<'a> {
-    pub fn new(state: &'a GameObjectState, id: ObjectId) -> Self {
-        Self { state, id }
+    pub fn new(state: &'a GameObjectState, id: ObjectId, resources: &'a TypeMap) -> Self {
+        Self {
+            state,
+            id,
+            resources,
+        }
+    }
+}
+
+impl ObjectContext<'_> {
+    pub fn resource<T: 'static>(&self) -> &T {
+        self.resources.get::<T>().unwrap()
     }
 }
 
@@ -616,7 +627,7 @@ impl GameObjects {
         self.hierarchy.remove_recursively(id);
     }
 
-    pub fn render(&self, simulation: &Simulation) {
+    pub fn render(&self, simulation: &Simulation, resources: &TypeMap) {
         for (id, object, state) in self.draw_layers.iter_ordered().map(|id| {
             (
                 id,
@@ -624,7 +635,7 @@ impl GameObjects {
                 self.state.get(id.0).unwrap(),
             )
         }) {
-            object.render(&ObjectContext::new(state, id), simulation, self)
+            object.render(&ObjectContext::new(state, id, resources), simulation, self)
         }
     }
 
