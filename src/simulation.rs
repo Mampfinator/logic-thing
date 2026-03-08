@@ -563,6 +563,34 @@ impl<T> StableVec<T> {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.buffer.iter_mut().filter_map(|slot| slot.as_mut())
     }
+
+    pub fn grow_to(&mut self, to: usize) {
+        if self.buffer.len() >= to {
+            return;
+        }
+
+        self.buffer
+            .extend(std::iter::repeat_with(|| None).take(to - self.buffer.len()));
+    }
+
+    pub fn set(&mut self, item: T, index: usize) -> &mut T {
+        self.grow_to(index + 1);
+        let slot = self.buffer.get_mut(index).unwrap();
+        *slot = Some(item);
+        slot.as_mut().unwrap()
+    }
+}
+
+impl<T: Default> StableVec<T> {
+    pub fn get_mut_or_insert_default(&mut self, index: usize) -> &mut T {
+        self.grow_to(index + 1);
+        let slot = self.buffer.get_mut(index).unwrap();
+        if slot.is_none() {
+            *slot = Some(T::default());
+        }
+
+        slot.as_mut().unwrap()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

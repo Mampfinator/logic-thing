@@ -4,7 +4,8 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use macroquad::math::{Circle, Rect, Vec2};
+use macroquad::math::{Circle, IVec2, Rect, Vec2};
+use macroquad::prelude::{Color, draw_line};
 use petgraph::{
     Direction::{Incoming, Outgoing},
     graph::NodeIndex,
@@ -13,7 +14,7 @@ use petgraph::{
 };
 
 use crate::{
-    Camera, Game,
+    Camera, Game, TILE_SIZE,
     simulation::{Chip, ChipId, Simulation, StableVec},
 };
 
@@ -62,10 +63,47 @@ impl TypeMap {
 }
 
 #[derive(Default)]
+struct DrawLayers {
+    layers: HashMap<usize, HashSet<ObjectId>>,
+}
+
+impl DrawLayers {
+    pub fn iter_ordered(&self) -> impl Iterator<Item = ObjectId> {
+        // is there any way to skip this allocation?
+        let mut keys_sorted = self.layers.keys().copied().collect::<Vec<_>>();
+        keys_sorted.sort_by(|a, b| a.cmp(b));
+        keys_sorted
+            .into_iter()
+            .flat_map(|key| self.layers.get(&key).unwrap().iter().copied())
+    }
+
+    pub fn set_layer(&mut self, object: ObjectId, layer: usize) {
+        for (&index, layer_set) in self.layers.iter_mut() {
+            if layer_set.contains(&object) {
+                if index == layer {
+                    return;
+                }
+
+                layer_set.remove(&object);
+                break;
+            }
+        }
+
+        if let Some(layer) = self.layers.get_mut(&layer) {
+            layer.insert(object);
+        } else {
+            let set = HashSet::from([object]);
+            self.layers.insert(layer, set);
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct GameObjects {
     objects: StableVec<GameObjectData>,
     state: StableVec<GameObjectState>,
     hierarchy: Hierarchy,
+    draw_layers: DrawLayers,
 }
 
 #[derive(Default)]
@@ -342,11 +380,6 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
         self
     }
 
-    pub fn set_draw_priority(&mut self, priority: usize) -> &mut Self {
-        self.state.draw_priority = priority;
-        self
-    }
-
     pub fn despawn(&mut self) -> &mut Self {
         self.push(Despawn(self.id))
     }
@@ -358,6 +391,10 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
     pub fn set_hovered(&mut self, hovered: bool) -> &mut Self {
         self.state.hovered = hovered;
         self
+    }
+
+    pub fn set_layer(&mut self, layer: usize) -> &mut Self {
+        self.push(SetLayer(self.id, layer))
     }
 }
 
@@ -413,6 +450,14 @@ pub trait ObjectCommand: 'static {
         simulation: &mut Simulation,
         resources: &mut TypeMap,
     );
+}
+
+struct SetLayer(pub ObjectId, pub usize);
+
+impl ObjectCommand for SetLayer {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
+        objects.draw_layers.set_layer(self.0, self.1);
+    }
 }
 
 struct MoveBy(ObjectId, Vec2);
@@ -506,7 +551,6 @@ impl GameObjects {
 
         let mut state = GameObjectState {
             position,
-            draw_priority: 0,
             shape: None,
             hovered: false,
             custom_data: TypeMap::default(),
@@ -573,11 +617,13 @@ impl GameObjects {
     }
 
     pub fn render(&self, simulation: &Simulation) {
-        let mut objects = self.iter().collect::<Vec<_>>();
-
-        objects.sort_by(|(_, _, a), (_, _, b)| a.draw_priority.cmp(&b.draw_priority));
-
-        for (id, object, state) in objects.into_iter() {
+        for (id, object, state) in self.draw_layers.iter_ordered().map(|id| {
+            (
+                id,
+                &*self.objects.get(id.0).unwrap().object,
+                self.state.get(id.0).unwrap(),
+            )
+        }) {
             object.render(&ObjectContext::new(state, id), simulation, self)
         }
     }
@@ -646,19 +692,16 @@ impl Shape {
 pub struct GameObjectState {
     pub position: Vec2,
     pub shape: Option<Shape>,
-    /// Objects with higher draw priority are drawn ***later***, thus above objects with a lower priority.
-    /// Mind that, within a priority group, there is no guarantee about draw ordering.
-    pub draw_priority: usize,
     pub hovered: bool,
     pub custom_data: TypeMap,
 }
 
 pub trait GameObject: 'static {
     #[allow(unused)]
-    fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {}
-    fn render(&self, context: &ObjectContext, simulation: &Simulation, objects: &GameObjects);
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {}
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects);
     #[allow(unused)]
-    fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {}
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {}
 
     #[allow(unused)]
     fn on_mouse_enter(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {}
@@ -673,17 +716,82 @@ pub trait GameObject: 'static {
     fn on_click_released(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {}
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    pub spacing: f32,
+    pub half_extent: i32,
+    pub color: Color,
+    pub axis_color: Color,
+    pub axis_width: f32,
+    pub line_width: f32,
+}
+
+impl Grid {
+    pub fn new(spacing: f32, half_extent: i32, color: Color) -> Self {
+        Self {
+            spacing,
+            half_extent,
+            color,
+            axis_color: color,
+            axis_width: 2.0,
+            line_width: 1.0,
+        }
+    }
+}
+
+impl Hash for Grid {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.spacing.to_bits().hash(state);
+        self.half_extent.hash(state);
+        self.color.r.to_bits().hash(state);
+        self.color.g.to_bits().hash(state);
+        self.color.b.to_bits().hash(state);
+        self.color.a.to_bits().hash(state);
+        self.axis_color.r.to_bits().hash(state);
+        self.axis_color.g.to_bits().hash(state);
+        self.axis_color.b.to_bits().hash(state);
+        self.axis_color.a.to_bits().hash(state);
+        self.axis_width.to_bits().hash(state);
+        self.line_width.to_bits().hash(state);
+    }
+}
+
+impl GameObject for Grid {
+    fn start(&mut self, state: &mut ObjectContextMut, _: &Simulation) {
+        state.set_layer(0);
+    }
+
+    fn render(&self, _: &ObjectContext, _: &Simulation, _: &GameObjects) {
+        let extent = self.half_extent as f32 * self.spacing;
+
+        for i in -self.half_extent..=self.half_extent {
+            let offset = i as f32 * self.spacing;
+            let is_axis = i == 0;
+
+            let color = if is_axis { self.axis_color } else { self.color };
+            let width = if is_axis {
+                self.axis_width
+            } else {
+                self.line_width
+            };
+
+            draw_line(-extent, offset, extent, offset, width, color);
+            draw_line(offset, -extent, offset, extent, width, color);
+        }
+    }
+}
+
 trait SplitForMgo<C: MakeGameObject> {
-    fn split_for_mgo(self) -> (C, Vec2, <C as MakeGameObject>::Args);
+    fn split_for_mgo(self) -> (C, IVec2, <C as MakeGameObject>::Args);
 }
 
 macro_rules! impl_split_for_mgo {
     ($($name:ident),*) => {
         #[allow(unused_parens)]
-        impl<C, $($name),*> SplitForMgo<C> for (C, Vec2, $ ( $name ),*)
+        impl<C, $($name),*> SplitForMgo<C> for (C, IVec2, $ ( $name ),*)
         where
             C: MakeGameObject<Args = ($( $name ),*)>, {
-            fn split_for_mgo(self) -> (C, Vec2, C::Args) {
+            fn split_for_mgo(self) -> (C, IVec2, C::Args) {
                 #[allow(non_snake_case)]
                 let (c, pos, $($name),*) = self;
                 (c, pos, ($ ($name),*))
@@ -710,7 +818,7 @@ pub(super) trait PlaceMgos<T, const N: usize> {
 impl<C: MakeGameObject + 'static, MGO: SplitForMgo<C>> PlaceMgos<C, 1> for MGO {
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let (c, pos, args) = self.split_for_mgo();
-        vec![game.place_chip(c, pos, args)]
+        vec![game.place_chip(c, pos.as_vec2() * TILE_SIZE, args)]
     }
 }
 
@@ -724,9 +832,9 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -743,11 +851,11 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -766,13 +874,13 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -793,15 +901,15 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -824,17 +932,17 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -858,19 +966,19 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.6.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }
@@ -898,21 +1006,21 @@ impl<
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
         let mut out = Vec::new();
         let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.6.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         let (c, pos, args) = self.7.split_for_mgo();
-        out.push(game.place_chip(c, pos, args));
+        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
         out
     }
 }

@@ -1,28 +1,30 @@
 use macroquad::{
     color::{BLACK, RED, WHITE},
-    input,
+    input::{self, KeyCode},
     math::{Rect, uvec2, vec2},
     shapes::draw_rectangle,
 };
 
-use crate::{GetState, ObjectContext, ObjectContextMut, impl_mgo};
+use crate::{
+    GetState, ObjectContext, ObjectContextMut, game_objects::Shape, impl_mgo, simulation::PinId,
+};
 
 use crate::{
     GameObject, GameObjects, TILE_SIZE,
     simulation::{Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation},
 };
 
-pub struct Switch {
+pub struct Switches {
     switches: usize,
 }
 
-impl Switch {
+impl Switches {
     pub fn new(switches: usize) -> Self {
         Self { switches }
     }
 }
 
-impl Chip for Switch {
+impl Chip for Switches {
     fn setup(&self) -> crate::simulation::PinLayout {
         PinLayout::new_with(
             uvec2(4, self.switches as u32),
@@ -33,71 +35,95 @@ impl Chip for Switch {
     fn update(&mut self, _state: &mut PinsState) {}
 }
 
-impl_mgo!(Switch as SwitchObj where Args = (usize));
+impl_mgo!(Switches as SwitchChip where Args = (usize));
 
 #[derive(Hash)]
-pub struct SwitchObj {
+pub struct SwitchChip {
     chip: ChipId,
-    switches: Vec<bool>,
+    switches: usize,
 }
 
-impl SwitchObj {
+impl SwitchChip {
     pub fn new(chip: ChipId, switches: usize) -> Self {
-        Self {
-            chip,
-            switches: std::iter::repeat_n(false, switches).collect(),
-        }
+        Self { chip, switches }
     }
 }
 
-// TODO: make individual switches GameObjects for easier handling.
-impl GameObject for SwitchObj {
-    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
-        self.chip.start(ctx, simulation);
+#[derive(PartialEq, Hash)]
+struct Switch(PinId);
+
+impl GameObject for Switch {
+    fn start(&mut self, ctx: &mut ObjectContextMut, _: &Simulation) {
+        ctx.set_layer(3);
+        ctx.set_shape(Shape::Rectangle(Rect::new(
+            ctx.position().x,
+            ctx.position().y,
+            TILE_SIZE * 2.,
+            TILE_SIZE - 2.,
+        )));
     }
 
-    fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {
-        if !input::is_mouse_button_pressed(input::MouseButton::Left) {
+    fn on_click(&mut self, _: &mut ObjectContextMut, simulation: &mut Simulation) {
+        if input::is_key_down(KeyCode::LeftAlt) {
             return;
         }
 
-        let mouse_pos = state.mouse_world_pos();
+        let pin = simulation.pins.get_mut(self.0).unwrap();
+        pin.state = !pin.state;
+    }
 
-        for (switch, switch_state) in self.switches.iter_mut().enumerate() {
-            let pos = state.position() + vec2(TILE_SIZE / 2., TILE_SIZE * switch as f32 + 1.);
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
+        let state = simulation.pins.get_state(self.0).unwrap_or(false);
 
-            if Rect::new(pos.x, pos.y, TILE_SIZE * 2., TILE_SIZE - 2.).contains(mouse_pos) {
-                *switch_state = !*switch_state;
-                let chip = simulation.chips.get(self.chip).unwrap();
-                let pin = simulation.pins.get_mut(chip.pins[switch].unwrap()).unwrap();
-                pin.state = !pin.state;
-            }
+        let color = if state { RED } else { BLACK };
+
+        draw_rectangle(
+            ctx.position().x,
+            ctx.position().y,
+            TILE_SIZE * 2.,
+            TILE_SIZE - 2.,
+            color,
+        );
+
+        let switch_x = if state { TILE_SIZE * 1.5 } else { 0. };
+        draw_rectangle(
+            ctx.position().x + switch_x,
+            ctx.position().y,
+            TILE_SIZE / 2.,
+            TILE_SIZE - 2.,
+            WHITE,
+        );
+    }
+}
+
+impl GameObject for SwitchChip {
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
+        self.chip.start(ctx, simulation);
+
+        let instance = simulation.chips.get(self.chip).unwrap();
+
+        for switch in 0..self.switches {
+            let pin = instance.get_pinid(Pin::Right(switch)).unwrap();
+            ctx.spawn_child(
+                Switch(pin),
+                ctx.position() + vec2(TILE_SIZE, TILE_SIZE * switch as f32 + 1.),
+            );
         }
+    }
+
+    fn on_click(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.chip.on_click(ctx, simulation);
+    }
+
+    fn on_click_released(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.chip.on_click_released(ctx, simulation);
+    }
+
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.chip.update(ctx, simulation);
     }
 
     fn render(&self, state: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         self.chip.render(state, simulation, objects);
-        for (switch, switch_state) in self.switches.iter().copied().enumerate() {
-            let switch_pos = state.position() + vec2(TILE_SIZE, TILE_SIZE * switch as f32 + 1.);
-            let color = if switch_state { RED } else { BLACK };
-
-            let switch_x = if switch_state { TILE_SIZE * 1.5 } else { 0. };
-
-            draw_rectangle(
-                switch_pos.x,
-                switch_pos.y,
-                TILE_SIZE * 2.,
-                TILE_SIZE - 2.,
-                color,
-            );
-
-            draw_rectangle(
-                switch_pos.x + switch_x,
-                switch_pos.y,
-                TILE_SIZE / 2.,
-                TILE_SIZE - 2.,
-                WHITE,
-            );
-        }
     }
 }

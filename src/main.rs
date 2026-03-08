@@ -4,15 +4,22 @@ use std::hash::{Hash, Hasher};
 use macroquad::{input, prelude::*};
 
 use crate::{
-    chips::{button, rom, switch},
+    chips::{button, rom, switch::Switches},
     game_objects::{
-        CommandBuffer, GameObject, GameObjects, GetState, MakeGameObject, ObjectContext,
+        CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
         ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap,
     },
     simulation::{Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation},
 };
 
 pub const TILE_SIZE: f32 = 16.0;
+
+fn snap_to_grid(position: Vec2, spacing: f32) -> Vec2 {
+    vec2(
+        (position.x / spacing).round() * spacing,
+        (position.y / spacing).round() * spacing,
+    )
+}
 
 pub mod chips;
 pub mod game_objects;
@@ -33,10 +40,10 @@ impl Game {
     /// let mut game = Game::default()
     ///
     /// let [clock, counter, led] = game.place_chips((
-    ///   (Clock::new(100), vec2(100., 100.)),
-    ///   (Counter8b, vec2(200., 100.)),
+    ///   (Clock::new(100), ivec2(6, 6)),
+    ///   (Counter8b, ivec2(12, 6)),
     ///   // this "RED" here is a rendering option. But it can figure it out. :)
-    ///   (Led, vec2(300., 100.), RED),
+    ///   (Led, ivec2(18, 6), RED),
     ///))
     /// ```
     pub fn place_chips<const N: usize, Marker, T: PlaceMgos<Marker, N>>(
@@ -102,7 +109,7 @@ impl Game {
             }
 
             if is_inside && released {
-                object.on_mouse_enter(&mut ctx, &mut self.simulation);
+                object.on_click_released(&mut ctx, &mut self.simulation);
             }
         }
 
@@ -125,13 +132,7 @@ impl Game {
     }
 
     pub fn render(&self) {
-        for (id, object, state) in self.game_objects.iter() {
-            object.render(
-                &ObjectContext::new(state, id),
-                &self.simulation,
-                &self.game_objects,
-            );
-        }
+        self.game_objects.render(&self.simulation);
     }
 }
 
@@ -152,7 +153,7 @@ impl_mgo!(
 
 impl GameObject for PinId {
     fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {
-        state.set_draw_priority(2);
+        state.set_layer(2);
 
         state.set_shape(Shape::Circle(Circle {
             x: state.position().x,
@@ -224,7 +225,7 @@ pub struct InvalidMarker;
 
 impl GameObject for NetworkId {
     fn start(&mut self, state: &mut ObjectContextMut, _: &Simulation) {
-        state.set_draw_priority(1);
+        state.set_layer(0);
     }
 
     fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {
@@ -236,7 +237,11 @@ impl GameObject for NetworkId {
     fn render(&self, _: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         let network = simulation.networks.get(*self).unwrap();
 
-        let color = if network.state { RED } else { GREEN };
+        let color = if network.state {
+            Color::new(0.7, 0.1, 0.1, 0.7)
+        } else {
+            Color::new(0.1, 0.7, 0.1, 0.7)
+        };
 
         for (a, b) in network.iter_connections() {
             let pos_a = objects.find_state(&a).unwrap().position;
@@ -392,6 +397,8 @@ impl PinSelection {
 }
 impl GameObject for ChipId {
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
+        ctx.set_layer(1);
+
         let instance = simulation.chips.get(*self).unwrap();
 
         ctx.set_shape(Shape::Rectangle(Rect::new(
@@ -409,21 +416,22 @@ impl GameObject for ChipId {
     }
 
     fn on_click(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        if !input::is_key_down(KeyCode::LeftAlt) {
+            return;
+        }
         let mouse_pos = ctx.mouse_world_pos();
         let offset = ChipClickOffset(ctx.position() - mouse_pos);
         ctx.insert_data(offset);
     }
 
     fn on_click_released(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
+        let snapped = snap_to_grid(ctx.position(), TILE_SIZE);
+        ctx.move_by(snapped - ctx.position());
         ctx.delete_data::<ChipClickOffset>();
     }
 
     fn update(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
-        if ctx.hovered()
-            && let Some(offset) = ctx.get_data::<ChipClickOffset>()
-            && input::is_key_down(KeyCode::LeftAlt)
-            && input::is_mouse_button_down(MouseButton::Left)
-        {
+        if let Some(offset) = ctx.get_data::<ChipClickOffset>() {
             let mouse_pos = ctx.mouse_world_pos();
             ctx.move_by(mouse_pos - ctx.position() + offset.0);
         }
@@ -457,12 +465,19 @@ async fn main() {
     let mut game = Game::default();
 
     game.resources.insert_default::<PinSelection>();
-    game.resources.insert_default::<ChipClickOffset>();
 
-    let [cpu, high] = game.place_chips((
-        (CPU::default(), vec2(100., 100.)),
-        (TieHigh, vec2(-25., 100.)),
-    ));
+    game.game_objects.insert(
+        Grid {
+            axis_color: Color::from_rgba(64, 78, 94, 220),
+            axis_width: 2.0,
+            ..Grid::new(TILE_SIZE, 200, Color::from_rgba(102, 127, 153, 90))
+        },
+        vec2(0., 0.),
+        &mut game.simulation,
+        &mut game.resources,
+    );
+
+    let [cpu, high] = game.place_chips(((CPU::default(), ivec2(6, 6)), (TieHigh, ivec2(-2, 6))));
 
     game.simulation.connect((cpu, "CE"), (high, "HIGH"));
 
@@ -475,9 +490,9 @@ async fn main() {
     }
 
     let [rom, high_2, clock_button] = game.place_chips((
-        (rom::ROM::from(rom), vec2(500., 100.)),
-        (TieHigh, vec2(348., 100. - TILE_SIZE)),
-        (button::Button, vec2(348., 100.)),
+        (rom::ROM::from(rom), ivec2(31, 6)),
+        (TieHigh, ivec2(22, 5)),
+        (button::Button, ivec2(22, 6)),
     ));
     game.simulation.connect((cpu, "CLK"), (clock_button, "OUT"));
 
@@ -485,14 +500,11 @@ async fn main() {
 
     game.simulation.connect((clock_button, "CLK"), (rom, "CLK"));
 
-    let [display_a, display_b] = game.place_chips((
-        (NumericDisplay, vec2(700., 100.)),
-        (NumericDisplay, vec2(700., 200.)),
-    ));
+    let [display] = game.place_chips((NumericDisplay, ivec2(44, 12)));
 
     for i in 0..8 {
         game.simulation
-            .connect((display_b, Pin::Top(i)), (rom, Pin::Right(i + 1)));
+            .connect((display, Pin::Top(i)), (rom, Pin::Right(i + 1)));
         game.simulation
             .connect((cpu, Pin::Right(i)), (rom, Pin::Right(i + 1)));
         game.simulation
