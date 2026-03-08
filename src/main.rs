@@ -507,12 +507,23 @@ impl GameObject for ChipId {
         }
     }
 
-    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
         let instance = simulation.chips.get(*self).unwrap();
         let size = instance.size.as_vec2() * TILE_SIZE;
-        let position = state.position();
+        let position = ctx.position();
 
         draw_rectangle(position.x, position.y, size.x, size.y, DARKGRAY);
+        if ctx.hovered() {
+            draw_rectangle_lines(
+                position.x + 1.,
+                position.y + 1.,
+                size.x - 2.,
+                size.y - 2.,
+                2.,
+                WHITE,
+            );
+        }
+
         draw_rectangle_lines(position.x, position.y, size.x, size.y, 1., BLACK);
     }
 }
