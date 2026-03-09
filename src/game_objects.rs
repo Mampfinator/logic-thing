@@ -4,8 +4,15 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use macroquad::math::{Circle, IVec2, Rect, Vec2};
-use macroquad::prelude::{Color, draw_line};
+use macroquad::{
+    input::{self, KeyCode, MouseButton},
+    math::{Circle, IVec2, Rect, Vec2, vec2},
+    prelude::{
+        BLACK, Color, DARKGRAY, GRAY, LIGHTGRAY, TextParams, WHITE, draw_circle,
+        draw_circle_lines, draw_line, draw_rectangle, draw_rectangle_lines, draw_text,
+        draw_text_ex, screen_height, screen_width, set_default_camera,
+    },
+};
 use petgraph::{
     Direction::{Incoming, Outgoing},
     graph::NodeIndex,
@@ -14,9 +21,16 @@ use petgraph::{
 };
 
 use crate::{
-    Camera, Game, TILE_SIZE,
+    Camera, Game, Resource, Resources, TILE_SIZE,
     simulation::{Chip, ChipId, Simulation, StableVec},
 };
+
+mod chip_catalog;
+use chip_catalog::{
+    CHIP_CATALOG, hit_test_menu_item, hotkey_to_catalog_index, menu_hotkey_label,
+    placement_menu_layout, placement_origin_from_cursor,
+};
+pub use chip_catalog::{ChipTemplate, PlacementUiState, UiInputResult};
 
 #[derive(Default)]
 pub struct TypeMap {
@@ -94,6 +108,14 @@ impl DrawLayers {
         } else {
             let set = HashSet::from([object]);
             self.layers.insert(layer, set);
+        }
+    }
+
+    pub fn remove(&mut self, object: ObjectId) {
+        for layer in self.layers.values_mut() {
+            if layer.remove(&object) {
+                return;
+            }
         }
     }
 }
@@ -217,6 +239,25 @@ pub trait MakeGameObject: Chip {
     fn make_game_object(id: ChipId, args: Self::Args) -> Self::Obj;
 }
 
+pub(crate) fn spawn_make_object<C: MakeGameObject + 'static>(
+    simulation: &mut Simulation,
+    game_objects: &mut GameObjects,
+    resources: &mut Resources,
+    chip: C,
+    position: Vec2,
+    args: <C as MakeGameObject>::Args,
+) -> (ChipId, ObjectId)
+where
+    <C as MakeGameObject>::Obj: Hash,
+{
+    let id = simulation.place_chip(chip);
+
+    let object = C::make_game_object(id, args);
+    let object_id = game_objects.insert(object, position, simulation, resources);
+
+    (id, object_id)
+}
+
 // TODO: make derive macro instead
 // eventually.
 /// Implement [`MakeGameObject`] for a series of types.
@@ -293,7 +334,7 @@ impl CommandBuffer {
         &mut self,
         game_objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     ) {
         for mut command in self.commands.drain(0..) {
             command.apply(game_objects, simulation, resources)
@@ -305,7 +346,7 @@ pub struct ObjectContextMut<'a, 'b> {
     state: &'a mut GameObjectState,
     id: ObjectId,
     commands: &'b mut CommandBuffer,
-    resources: &'a mut TypeMap,
+    resources: &'a mut Resources,
 }
 
 impl<'a, 'b> ObjectContextMut<'a, 'b> {
@@ -313,7 +354,7 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
         state: &'a mut GameObjectState,
         id: ObjectId,
         commands: &'b mut CommandBuffer,
-        resources: &'a mut TypeMap,
+        resources: &'a mut Resources,
     ) -> Self {
         Self {
             state,
@@ -330,19 +371,19 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
             .get_mouse_world_pos()
     }
 
-    pub fn get_resource_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.resources.get_mut::<T>()
+    pub fn get_resource_mut<T: Resource>(&mut self) -> Option<&mut T> {
+        self.resources.get_mut()
     }
 
-    pub fn resource_mut<T: 'static>(&mut self) -> &mut T {
+    pub fn resource_mut<T: Resource>(&mut self) -> &mut T {
         self.get_resource_mut().unwrap()
     }
 
-    pub fn get_resource<T: 'static>(&self) -> Option<&T> {
+    pub fn get_resource<T: Resource>(&self) -> Option<&T> {
         self.resources.get()
     }
 
-    pub fn resource<T: 'static>(&self) -> &T {
+    pub fn resource<T: Resource>(&self) -> &T {
         self.get_resource().unwrap()
     }
 
@@ -459,14 +500,14 @@ pub trait ObjectCommand: 'static {
         &mut self,
         objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     );
 }
 
 struct SetLayer(pub ObjectId, pub usize);
 
 impl ObjectCommand for SetLayer {
-    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut Resources) {
         objects.draw_layers.set_layer(self.0, self.1);
     }
 }
@@ -474,7 +515,7 @@ impl ObjectCommand for SetLayer {
 struct MoveBy(ObjectId, Vec2);
 
 impl ObjectCommand for MoveBy {
-    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut Resources) {
         objects.move_by(self.0, self.1);
     }
 }
@@ -482,7 +523,7 @@ impl ObjectCommand for MoveBy {
 struct Despawn(ObjectId);
 
 impl ObjectCommand for Despawn {
-    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut TypeMap) {
+    fn apply(&mut self, objects: &mut GameObjects, _: &mut Simulation, _: &mut Resources) {
         objects.despawn(self.0);
     }
 }
@@ -500,7 +541,7 @@ impl<C: GameObject + Hash> ObjectCommand for SpawnRelated<C> {
         &mut self,
         objects: &mut GameObjects,
         simulation: &mut Simulation,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     ) {
         objects.insert_child(
             self.0,
@@ -531,7 +572,7 @@ impl GameObjects {
         child: O,
         position: Vec2,
         simulation: &mut Simulation,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     ) -> ObjectId {
         let child = self.insert(child, position, simulation, resources);
         self.hierarchy.set_parent(child, parent).unwrap();
@@ -543,7 +584,7 @@ impl GameObjects {
         object: O,
         position: Vec2,
         simulation: &mut Simulation,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     ) -> ObjectId {
         let mut slot = self.objects.reserve();
 
@@ -605,11 +646,252 @@ impl GameObjects {
         self.state.get(index)
     }
 
+    pub fn update_placement_ui(
+        &mut self,
+        simulation: &mut Simulation,
+        resources: &mut Resources,
+    ) -> UiInputResult {
+        let mouse_screen = {
+            let (x, y) = input::mouse_position();
+            vec2(x, y)
+        };
+        let mouse_world = resources
+            .get::<Camera>()
+            .map(|camera| camera.get_mouse_world_pos())
+            .unwrap_or(mouse_screen);
+
+        let layout = placement_menu_layout(screen_width(), screen_height(), CHIP_CATALOG.len());
+        let pointer_over_menu = layout.panel.contains(mouse_screen);
+        let hovered = hit_test_menu_item(&layout.items, mouse_screen);
+
+        let mut selected = resources
+            .get::<PlacementUiState>()
+            .and_then(|state| state.selected);
+
+        if let Some(index) = hotkey_to_catalog_index().filter(|index| *index < CHIP_CATALOG.len()) {
+            selected = Some(CHIP_CATALOG[index]);
+        }
+
+        if input::is_key_pressed(KeyCode::Escape)
+            || input::is_mouse_button_pressed(MouseButton::Right)
+        {
+            selected = None;
+        }
+
+        let mut result = UiInputResult {
+            pointer_over_menu,
+            ..Default::default()
+        };
+
+        if pointer_over_menu && input::is_mouse_button_released(MouseButton::Left) {
+            result.consume_world_left_release = true;
+        }
+
+        if input::is_mouse_button_pressed(MouseButton::Left) {
+            if pointer_over_menu {
+                result.consume_world_left_click = true;
+                if let Some(index) = hovered {
+                    selected = Some(CHIP_CATALOG[index]);
+                }
+            } else if let Some(template) = selected {
+                result.consume_world_left_click = true;
+                let origin = placement_origin_from_cursor(template, mouse_world);
+                template.spawn_at(origin, simulation, self, resources);
+
+                // deselect template unless user specifically wants to place multiple chips
+                if !input::is_key_down(KeyCode::LeftShift) {
+                    selected = None;
+                }
+            }
+        }
+
+        let ghost_world_pos =
+            selected.map(|template| placement_origin_from_cursor(template, mouse_world));
+
+        let ui_state = resources.get_mut_or_insert_default::<PlacementUiState>();
+        ui_state.selected = selected;
+        ui_state.hovered = hovered;
+        ui_state.pointer_over_menu = pointer_over_menu;
+        ui_state.menu_rect = Some(layout.panel);
+        ui_state.item_rects = layout.items;
+        ui_state.ghost_world_pos = ghost_world_pos;
+
+        result
+    }
+
+    pub fn render_placement_overlays(&self, _simulation: &Simulation, resources: &TypeMap) {
+        if let Some(ui_state) = resources.get::<PlacementUiState>()
+            && let (Some(template), Some(position)) = (ui_state.selected, ui_state.ghost_world_pos)
+        {
+            self.draw_chip_preview(
+                template,
+                position,
+                TILE_SIZE,
+                Color::new(0.2, 0.2, 0.2, 0.45),
+                Color::new(1.0, 1.0, 1.0, 0.8),
+                Color::new(1.0, 0.3, 0.3, 0.9),
+            );
+        }
+
+        set_default_camera();
+
+        let fallback_layout =
+            placement_menu_layout(screen_width(), screen_height(), CHIP_CATALOG.len());
+        let (panel, item_rects, selected, hovered) =
+            if let Some(state) = resources.get::<PlacementUiState>() {
+                let rects = if state.item_rects.len() == CHIP_CATALOG.len() {
+                    state.item_rects.clone()
+                } else {
+                    fallback_layout.items.clone()
+                };
+                (
+                    state.menu_rect.unwrap_or(fallback_layout.panel),
+                    rects,
+                    state.selected,
+                    state.hovered,
+                )
+            } else {
+                (fallback_layout.panel, fallback_layout.items, None, None)
+            };
+
+        draw_rectangle(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            Color::from_rgba(18, 26, 38, 220),
+        );
+        draw_rectangle_lines(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            2.0,
+            Color::from_rgba(98, 132, 171, 220),
+        );
+
+        draw_text_ex(
+            "Chip Palette",
+            panel.x + 12.0,
+            panel.y + 22.0,
+            TextParams {
+                font_size: 24,
+                color: WHITE,
+                ..Default::default()
+            },
+        );
+
+        for (index, template) in CHIP_CATALOG.iter().copied().enumerate() {
+            let rect = item_rects[index];
+            let mut bg = Color::from_rgba(35, 48, 66, 220);
+
+            if Some(index) == hovered {
+                bg = Color::from_rgba(50, 68, 94, 245);
+            }
+            if Some(template) == selected {
+                bg = Color::from_rgba(80, 98, 120, 245);
+            }
+
+            draw_rectangle(rect.x, rect.y, rect.w, rect.h, bg);
+            draw_rectangle_lines(
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                1.0,
+                Color::from_rgba(120, 145, 174, 220),
+            );
+
+            let preview_box = Rect::new(rect.x + 8.0, rect.y + 6.0, 62.0, rect.h - 12.0);
+            let geometry = template.preview_geometry();
+            let scale = (preview_box.w / geometry.size_tiles.x as f32)
+                .min(preview_box.h / geometry.size_tiles.y as f32)
+                .max(1.0);
+            let preview_size = geometry.size_tiles.as_vec2() * scale;
+            let preview_pos = vec2(
+                preview_box.x + (preview_box.w - preview_size.x) / 2.0,
+                preview_box.y + (preview_box.h - preview_size.y) / 2.0,
+            );
+
+            self.draw_chip_preview(
+                template,
+                preview_pos,
+                scale,
+                DARKGRAY,
+                LIGHTGRAY,
+                Color::from_rgba(223, 85, 85, 240),
+            );
+
+            draw_text(template.label(), rect.x + 80.0, rect.y + 24.0, 22.0, WHITE);
+            draw_text(
+                &format!("[{}]", menu_hotkey_label(index)),
+                rect.x + 80.0,
+                rect.y + 44.0,
+                18.0,
+                GRAY,
+            );
+        }
+
+        draw_text(
+            "LMB: select/place  RMB/Esc: cancel",
+            panel.x + 12.0,
+            panel.y + panel.h - 8.0,
+            18.0,
+            LIGHTGRAY,
+        );
+    }
+
+    fn draw_chip_preview(
+        &self,
+        template: ChipTemplate,
+        position: Vec2,
+        scale: f32,
+        body_color: Color,
+        border_color: Color,
+        pin_color: Color,
+    ) {
+        let geometry = template.preview_geometry();
+        let size = geometry.size_tiles.as_vec2() * scale;
+
+        draw_rectangle(position.x, position.y, size.x, size.y, body_color);
+        draw_rectangle_lines(
+            position.x,
+            position.y,
+            size.x,
+            size.y,
+            (scale * 0.08).max(1.0),
+            border_color,
+        );
+
+        let pin_radius = (scale * 0.15).max(1.5);
+        for pin in geometry.pin_offsets_tiles {
+            let pin_pos = position + pin * scale;
+            draw_circle(pin_pos.x, pin_pos.y, pin_radius, pin_color);
+            draw_circle_lines(pin_pos.x, pin_pos.y, pin_radius, 1.0, BLACK);
+        }
+    }
+
+    fn find_by_hash(&mut self, type_id: TypeId, hash: u64) -> Option<ObjectId> {
+        self.objects
+            .iter()
+            .find(|object| object.identifier == (type_id, hash))
+            .map(|o| o.id)
+    }
+
+    pub fn find_and_despawn<O: GameObject + Hash>(&mut self, object: &O) {
+        let mut hasher = DefaultHasher::default();
+        object.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(id) = self.find_by_hash(TypeId::of::<O>(), hash) {
+            self.despawn(id);
+        }
+    }
+
     pub fn update(
         &mut self,
         simulation: &mut Simulation,
         _camera: &mut Camera,
-        resources: &mut TypeMap,
+        resources: &mut Resources,
     ) {
         let mut buffer = CommandBuffer::default();
 
@@ -624,7 +906,12 @@ impl GameObjects {
     pub fn despawn(&mut self, id: ObjectId) {
         self.objects.remove(id.0);
         self.state.remove(id.0);
-        self.hierarchy.remove_recursively(id);
+        if let Some(children) = self.hierarchy.remove_recursively(id) {
+            for child in children {
+                self.despawn(child);
+            }
+        }
+        self.draw_layers.remove(id);
     }
 
     pub fn render(&self, simulation: &Simulation, resources: &TypeMap) {

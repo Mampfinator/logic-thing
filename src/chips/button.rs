@@ -99,6 +99,10 @@ impl GameObject for ButtonObj {
     }
 
     fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        if simulation.chips.get(self.chip).is_none() {
+            ctx.despawn();
+            return;
+        }
         self.chip.update(ctx, simulation);
     }
 

@@ -1,16 +1,17 @@
 use core::f32;
 use std::{
-    collections::HashSet,
+    any::{Any, TypeId},
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
 };
 
 use macroquad::{input, prelude::*};
 
 use crate::{
-    chips::{button, rom, switch::Switches},
+    chips::{button, rom},
     game_objects::{
         CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
-        ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap,
+        ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap, spawn_make_object,
     },
     simulation::{Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation},
 };
@@ -34,7 +35,113 @@ use chips::cpu::{CPU, DATA_PINS};
 struct Game {
     pub simulation: Simulation,
     pub game_objects: GameObjects,
-    pub resources: TypeMap,
+    pub resources: Resources,
+}
+
+#[derive(Default)]
+pub struct Resources {
+    resources: TypeMap,
+    update_thunks: HashMap<TypeId, fn(&mut TypeMap, &mut GameCommands)>,
+}
+
+trait GameCommand {
+    fn apply(&mut self, game: &mut Game);
+}
+
+struct RemoveChip(ChipId);
+impl GameCommand for RemoveChip {
+    fn apply(&mut self, game: &mut Game) {
+        game.delete_chip(self.0);
+    }
+}
+
+#[derive(Default)]
+struct GameCommandBuffer(Vec<Box<dyn GameCommand>>);
+impl GameCommandBuffer {
+    pub fn apply(self, game: &mut Game) {
+        for mut command in self.0 {
+            command.apply(game)
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct GameCommands {
+    buffer: GameCommandBuffer,
+}
+
+impl GameCommands {
+    pub fn remove_chip(&mut self, chip: ChipId) -> &mut Self {
+        self.buffer.0.push(Box::new(RemoveChip(chip)));
+        self
+    }
+}
+
+pub trait Resource: Any + 'static {
+    #[allow(unused)]
+    fn update(&mut self, commands: &mut GameCommands) {}
+}
+
+impl Resources {
+    pub fn update(&mut self, commands: &mut GameCommands) {
+        for update in self.update_thunks.values_mut() {
+            update(&mut self.resources, commands);
+        }
+    }
+
+    pub fn insert<T: Resource>(&mut self, value: T) -> &mut Self {
+        self.resources.insert(value);
+        self.update_thunks
+            .insert(TypeId::of::<T>(), |types, commands| {
+                types.get_mut::<T>().unwrap().update(commands)
+            });
+        self
+    }
+
+    pub fn get_mut<T: Resource>(&mut self) -> Option<&mut T> {
+        self.resources.get_mut()
+    }
+
+    pub fn get<T: Resource>(&self) -> Option<&T> {
+        self.resources.get()
+    }
+
+    pub fn insert_default<T: Resource + Default>(&mut self) -> &mut Self {
+        self.insert(T::default())
+    }
+
+    pub fn get_mut_or_insert_default<T: Resource + Default>(&mut self) -> &mut T {
+        if !self.update_thunks.contains_key(&TypeId::of::<T>()) {
+            self.insert(T::default());
+        }
+
+        self.resources.get_mut().unwrap()
+    }
+
+    pub fn delete<T: Resource>(&mut self) -> Option<T> {
+        let removed = self.resources.delete();
+        if removed.is_some() {
+            self.update_thunks.remove(&TypeId::of::<T>());
+        }
+
+        removed
+    }
+
+    pub fn resource_scope<T: Resource, F: FnOnce(&mut T, &mut Self)>(&mut self, f: F) -> &mut Self {
+        let Some(mut resource) = self.resources.delete::<T>() else {
+            return self;
+        };
+
+        f(&mut resource, self);
+
+        self.resources.insert(resource);
+
+        self
+    }
+
+    pub fn as_typemap(&self) -> &TypeMap {
+        &self.resources
+    }
 }
 
 impl Game {
@@ -65,14 +172,19 @@ impl Game {
     where
         <C as MakeGameObject>::Obj: Hash,
     {
-        let id = self.simulation.place_chip(chip);
+        spawn_make_object(
+            &mut self.simulation,
+            &mut self.game_objects,
+            &mut self.resources,
+            chip,
+            position,
+            args,
+        )
+    }
 
-        let object = C::make_game_object(id, args);
-        let oid =
-            self.game_objects
-                .insert(object, position, &mut self.simulation, &mut self.resources);
-
-        (id, oid)
+    pub fn delete_chip(&mut self, chip: ChipId) {
+        self.simulation.remove_chip(chip);
+        self.game_objects.find_and_despawn(&chip);
     }
 
     fn camera(&mut self) -> &mut Camera {
@@ -80,22 +192,40 @@ impl Game {
     }
 
     pub fn update(&mut self) {
-        self.camera().update();
+        let mut commands = GameCommands::default();
+        self.resources.update(&mut commands);
+        commands.buffer.apply(self);
 
         // process mouse information.
         let mouse_pos = self.camera().get_mouse_world_pos();
         let clicked = input::is_mouse_button_pressed(MouseButton::Left);
         let released = input::is_mouse_button_released(MouseButton::Left);
+        let ui_result = self
+            .game_objects
+            .update_placement_ui(&mut self.simulation, &mut self.resources);
+        let clicked = clicked && !ui_result.consume_world_left_click;
+        let released = released && !ui_result.consume_world_left_release;
 
         let mut buffer = CommandBuffer::default();
 
         for (id, object, state) in self.game_objects.iter_mut() {
-            let Some(is_inside) = state.shape.as_ref().map(|shape| shape.contains(mouse_pos))
+            let mut ctx = ObjectContextMut::new(state, id, &mut buffer, &mut self.resources);
+            if ui_result.pointer_over_menu {
+                if ctx.hovered() {
+                    ctx.set_hovered(false);
+                    object.on_mouse_exit(&mut ctx, &mut self.simulation);
+                }
+                continue;
+            }
+
+            let Some(is_inside) = ctx
+                .get_state()
+                .shape
+                .as_ref()
+                .map(|shape| shape.contains(mouse_pos))
             else {
                 continue;
             };
-
-            let mut ctx = ObjectContextMut::new(state, id, &mut buffer, &mut self.resources);
 
             if is_inside && !ctx.hovered() {
                 ctx.set_hovered(true);
@@ -134,8 +264,12 @@ impl Game {
         );
     }
 
-    pub fn render(&self) {
-        self.game_objects.render(&self.simulation, &self.resources);
+    pub fn render(&mut self) {
+        set_camera(&self.camera().camera);
+        self.game_objects
+            .render(&self.simulation, self.resources.as_typemap());
+        self.game_objects
+            .render_placement_overlays(&self.simulation, &self.resources.as_typemap());
     }
 }
 
@@ -152,6 +286,7 @@ impl_mgo!(
     Led as LedObj where Args = (Color),
     NumericDisplay as NumericDisplayObj,
     CPU,
+    Nand,
 );
 
 impl GameObject for PinId {
@@ -189,9 +324,10 @@ impl GameObject for PinId {
     }
 
     fn on_click(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
-        let selection = ctx.resource_mut::<PinSelection>();
-        if let Some(other) = selection.select(*self) {
+        let selection = ctx.resource_mut::<Selection>();
+        if let Some(other) = selection.select_pin(*self) {
             simulation.toggle_connect_by_pinid(other, *self);
+            selection.reset();
         }
     }
 
@@ -250,7 +386,9 @@ impl GameObject for NetworkId {
     fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         let highlight_pins = ctx.resource::<HoveredPins>();
 
-        let network = simulation.networks.get(*self).unwrap();
+        let Some(network) = simulation.networks.get(*self) else {
+            return;
+        };
 
         for (a, b) in network.iter_connections() {
             let pos_a = objects.find_state(&a).unwrap().position;
@@ -343,6 +481,8 @@ struct HoveredPins {
     pins: HashSet<PinId>,
 }
 
+impl Resource for HoveredPins {}
+
 impl HoveredPins {
     pub fn clear(&mut self) {
         self.pins.clear()
@@ -367,20 +507,8 @@ pub struct Camera {
     zoom_factor: f32,
 }
 
-impl Default for Camera {
-    fn default() -> Self {
-        let mut camera = Camera2D::default();
-        camera.target = vec2(screen_width() / 2., screen_height() / 2.);
-
-        Self {
-            camera,
-            zoom_factor: 1.5,
-        }
-    }
-}
-
-impl Camera {
-    pub fn update(&mut self) {
+impl Resource for Camera {
+    fn update(&mut self, _: &mut GameCommands) {
         if input::is_key_pressed(KeyCode::KpAdd) {
             self.zoom_by(0.1);
         } else if input::is_key_pressed(KeyCode::KpSubtract) {
@@ -425,7 +553,21 @@ impl Camera {
 
         set_camera(&self.camera);
     }
+}
 
+impl Default for Camera {
+    fn default() -> Self {
+        let mut camera = Camera2D::default();
+        camera.target = vec2(screen_width() / 2., screen_height() / 2.);
+
+        Self {
+            camera,
+            zoom_factor: 1.5,
+        }
+    }
+}
+
+impl Camera {
     pub fn get_mouse_world_pos(&self) -> Vec2 {
         let screen_pos = input::mouse_position();
         self.camera
@@ -440,21 +582,44 @@ impl Camera {
     }
 }
 
-#[derive(Default)]
-struct PinSelection {
-    other: Option<PinId>,
+#[derive(Default, Clone, Copy)]
+pub enum Selection {
+    #[default]
+    None,
+    Pin(PinId),
+    Chip(ChipId),
 }
 
-impl PinSelection {
-    pub fn select(&mut self, pin: PinId) -> Option<PinId> {
-        if self.other.is_none() {
-            self.other = Some(pin);
-            None
-        } else {
-            self.other.take()
+impl Resource for Selection {
+    fn update(&mut self, commands: &mut GameCommands) {
+        if input::is_key_pressed(KeyCode::Delete)
+            && let Selection::Chip(chip) = self
+        {
+            commands.remove_chip(*chip);
+            self.reset();
         }
     }
 }
+
+impl Selection {
+    pub fn select_chip(&mut self, chip: ChipId) {
+        *self = Selection::Chip(chip)
+    }
+
+    pub fn select_pin(&mut self, pin: PinId) -> Option<PinId> {
+        if let Self::Pin(other) = self {
+            Some(*other)
+        } else {
+            *self = Selection::Pin(pin);
+            None
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Selection::None
+    }
+}
+
 impl GameObject for ChipId {
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
         ctx.set_layer(1);
@@ -477,6 +642,7 @@ impl GameObject for ChipId {
 
     fn on_click(&mut self, ctx: &mut ObjectContextMut, _: &mut Simulation) {
         if !input::is_key_down(KeyCode::LeftAlt) {
+            ctx.resource_mut::<Selection>().select_chip(*self);
             return;
         }
         let mouse_pos = ctx.mouse_world_pos();
@@ -540,13 +706,11 @@ async fn main() {
 
     next_frame().await;
 
-    let mut camera = Camera::default();
-    camera.update();
-
     let mut game = Game::default();
 
-    game.resources.insert_default::<PinSelection>();
-    game.resources.insert_default::<HoveredPins>();
+    game.resources
+        .insert_default::<Selection>()
+        .insert_default::<HoveredPins>();
 
     game.game_objects.insert(
         Grid {
@@ -612,26 +776,40 @@ async fn main() {
 
         game.update();
 
-        let selection = game.resources.get_mut::<PinSelection>().unwrap();
+        let selection = game.resources.get_mut::<Selection>().unwrap();
 
         if input::is_mouse_button_pressed(MouseButton::Right) {
-            selection.other = None;
+            selection.reset();
         }
 
-        let selection = selection.other;
+        if input::is_key_pressed(KeyCode::Delete)
+            && let Selection::Chip(chip) = *selection
+        {
+            selection.reset();
+            game.delete_chip(chip);
+        }
+
+        let selection = game.resources.get_mut::<Selection>().unwrap();
+
+        set_default_camera();
+        if let Some(text) = match selection {
+            Selection::Chip(id) => Some(format!("Chip selected: {id:?}")),
+            Selection::Pin(id) => {
+                let pin = game.simulation.pins.get(*id).unwrap();
+                Some(format!(
+                    "Pin selected: {}",
+                    pin.label
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or(format!("Pin {}", pin.id.0))
+                ))
+            }
+            Selection::None => None,
+        } {
+            draw_text(&text, 0., 100., 32., WHITE);
+        }
 
         game.render();
-
-        if let Some(pin) = selection {
-            let pin = game.simulation.pins.get(pin).unwrap();
-            let label = pin
-                .label
-                .as_ref()
-                .cloned()
-                .unwrap_or(format!("Pin {}", pin.id.0));
-
-            draw_text(&format!("Pin selected: {}", label), 0., 100., 32., WHITE);
-        }
 
         draw_fps();
 
@@ -834,8 +1012,12 @@ impl GameObject for NumericDisplayObj {
         self.0.on_mouse_exit(ctx, simulation);
     }
 
-    fn update(&mut self, state: &mut ObjectContextMut, simulation: &mut Simulation) {
-        self.0.update(state, simulation);
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        if simulation.chips.get(self.0).is_none() {
+            ctx.despawn();
+            return;
+        }
+        self.0.update(ctx, simulation);
     }
 
     fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
