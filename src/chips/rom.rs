@@ -69,7 +69,7 @@ impl Chip for ROM {
         let clock = state.read_wire(CLK);
 
         if clock.is_falling_edge() {
-            let address = state.read_array(&ADDRESS_PINS).as_integer();
+            let address = state.read_array(&ADDRESS_PINS).into_integer();
             let value = self.content[address as usize];
             state.set_array(&DATA_PINS, value)
         }

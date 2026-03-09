@@ -103,7 +103,7 @@ impl Chip for CPU {
 
 #[derive(Debug)]
 enum DecodeError {
-    Other(String),
+    InvalidInstruction,
 }
 
 #[derive(Default)]
@@ -112,10 +112,6 @@ struct DecodeState {
 }
 
 impl DecodeState {
-    pub fn reset(&mut self) {
-        self.bytes.clear();
-    }
-
     pub fn try_decode(
         &mut self,
         state: &mut PinsState,
@@ -140,7 +136,7 @@ impl DecodeState {
 
     pub fn try_parse_instruction(&self) -> Result<Option<Instruction>, DecodeError> {
         if self.bytes.len() > 5 {
-            Err(DecodeError::Other("invalid instruction".into()))
+            Err(DecodeError::InvalidInstruction)
         } else {
             Ok(Instruction::try_parse(&self.bytes))
         }

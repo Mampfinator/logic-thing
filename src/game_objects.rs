@@ -8,17 +8,12 @@ use macroquad::{
     input::{self, KeyCode, MouseButton},
     math::{Circle, IVec2, Rect, Vec2, vec2},
     prelude::{
-        BLACK, Color, DARKGRAY, GRAY, LIGHTGRAY, TextParams, WHITE, draw_circle,
-        draw_circle_lines, draw_line, draw_rectangle, draw_rectangle_lines, draw_text,
-        draw_text_ex, screen_height, screen_width, set_default_camera,
+        BLACK, Color, DARKGRAY, GRAY, LIGHTGRAY, TextParams, WHITE, draw_circle, draw_circle_lines,
+        draw_line, draw_rectangle, draw_rectangle_lines, draw_text, draw_text_ex, screen_height,
+        screen_width, set_default_camera,
     },
 };
-use petgraph::{
-    Direction::{Incoming, Outgoing},
-    graph::NodeIndex,
-    prelude::StableDiGraph,
-    visit::EdgeRef,
-};
+use petgraph::{Direction::Incoming, graph::NodeIndex, prelude::StableDiGraph};
 
 use crate::{
     Camera, Game, Resource, Resources, TILE_SIZE,
@@ -85,7 +80,7 @@ impl DrawLayers {
     pub fn iter_ordered(&self) -> impl Iterator<Item = ObjectId> {
         // is there any way to skip this allocation?
         let mut keys_sorted = self.layers.keys().copied().collect::<Vec<_>>();
-        keys_sorted.sort_by(|a, b| a.cmp(b));
+        keys_sorted.sort();
         keys_sorted
             .into_iter()
             .flat_map(|key| self.layers.get(&key).unwrap().iter().copied())
@@ -141,12 +136,6 @@ enum ParentError {
     ChildToParent,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum DeparentError {
-    NoSuchNode,
-    NoSuchRelationship,
-}
-
 impl Hierarchy {
     fn insert_root(&mut self, object: ObjectId) -> Option<NodeIndex> {
         if self.indices.contains_key(&object) {
@@ -179,22 +168,6 @@ impl Hierarchy {
         }
 
         self.graph.add_edge(child, parent, ());
-        Ok(())
-    }
-
-    pub fn deparent(&mut self, node: ObjectId) -> Result<(), DeparentError> {
-        let child = self.indices.get(&node).ok_or(DeparentError::NoSuchNode)?;
-        let edge = self
-            .graph
-            .edges_directed(*child, Outgoing)
-            .next()
-            .ok_or(DeparentError::NoSuchRelationship)?
-            .id();
-
-        self.graph.remove_edge(edge);
-
-        self.roots.insert(*child);
-
         Ok(())
     }
 
@@ -268,31 +241,36 @@ macro_rules! impl_mgo {
     ($type:ty) => {
         impl $crate::game_objects::MakeGameObject for $type {
             type Args = ();
-            type Obj = crate::ChipId;
-            fn make_game_object(id: crate::ChipId, _args: ()) -> crate::ChipId {
+            type Obj = $crate::simulation::ChipId;
+            fn make_game_object(
+                id: $crate::simulation::ChipId,
+                _args: (),
+            ) -> $crate::simulation::ChipId {
                 id
             }
         }
     };
 
     ($type:ty as $obj:ty) => {
-        impl crate::game_objects::MakeGameObject for $type {
+        impl $crate::game_objects::MakeGameObject for $type {
             type Args = ();
             type Obj = $obj;
-            fn make_game_object(id: ChipId, _args: ()) -> Self::Obj {
+            fn make_game_object(id: $crate::simulation::ChipId, _args: ()) -> Self::Obj {
                 <$obj as From::<_>>::from(id)
             }
-
         }
     };
 
     ($type:ty as $obj:ty where Args = $($args:ty),*) => {
-        impl crate::game_objects::MakeGameObject for $type {
+        impl $crate::game_objects::MakeGameObject for $type {
             #[allow(unused_parens)]
             type Args = ($($args),*);
             type Obj = $obj;
             #[allow(unused_parens)]
-            fn make_game_object(id: ChipId, args: ($($args),*)) -> Self::Obj {
+            fn make_game_object(
+                id: $crate::simulation::ChipId,
+                args: ($($args),*),
+            ) -> Self::Obj {
                 <$obj>::new(id, args)
             }
         }
@@ -490,6 +468,10 @@ impl<'a> ObjectContext<'a> {
 }
 
 impl ObjectContext<'_> {
+    pub fn id(&self) -> ObjectId {
+        self.id
+    }
+
     pub fn resource<T: 'static>(&self) -> &T {
         self.resources.get::<T>().unwrap()
     }
@@ -1108,7 +1090,6 @@ impl_split_for_mgo!(A0, A1, A2, A3, A4, A5);
 impl_split_for_mgo!(A0, A1, A2, A3, A4, A5, A6);
 impl_split_for_mgo!(A0, A1, A2, A3, A4, A5, A6, A7);
 
-// TODO: this really needs to be a macro. But macros are hard.
 pub(super) trait PlaceMgos<T, const N: usize> {
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)>;
 }
@@ -1120,205 +1101,67 @@ impl<C: MakeGameObject + 'static, MGO: SplitForMgo<C>> PlaceMgos<C, 1> for MGO {
     }
 }
 
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-> PlaceMgos<(C0, C1), 2> for (MGO0, MGO1)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
+macro_rules! impl_place_mgos {
+    ($count:literal; $(($chip:ident, $mgo:ident, $index:tt)),+ $(,)?) => {
+        impl<$($chip: MakeGameObject + 'static, $mgo: SplitForMgo<$chip>),+>
+            PlaceMgos<($($chip),+), $count> for ($($mgo),+)
+        {
+            fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
+                let mut out = Vec::with_capacity($count);
+                $(
+                    let (c, pos, args) = self.$index.split_for_mgo();
+                    out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
+                )+
+                out
+            }
+        }
+    };
 }
 
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-> PlaceMgos<(C0, C1, C2), 3> for (MGO0, MGO1, MGO2)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
-
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-    C3: MakeGameObject + 'static,
-    MGO3: SplitForMgo<C3>,
-> PlaceMgos<(C0, C1, C2, C3), 4> for (MGO0, MGO1, MGO2, MGO3)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
-
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-    C3: MakeGameObject + 'static,
-    MGO3: SplitForMgo<C3>,
-    C4: MakeGameObject + 'static,
-    MGO4: SplitForMgo<C4>,
-> PlaceMgos<(C0, C1, C2, C3, C4), 5> for (MGO0, MGO1, MGO2, MGO3, MGO4)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
-
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-    C3: MakeGameObject + 'static,
-    MGO3: SplitForMgo<C3>,
-    C4: MakeGameObject + 'static,
-    MGO4: SplitForMgo<C5>,
-    C5: MakeGameObject + 'static,
-    MGO5: SplitForMgo<C4>,
-> PlaceMgos<(C0, C1, C2, C3, C4, C5), 6> for (MGO0, MGO1, MGO2, MGO3, MGO4, MGO5)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-    C3: MakeGameObject + 'static,
-    MGO3: SplitForMgo<C3>,
-    C4: MakeGameObject + 'static,
-    MGO4: SplitForMgo<C4>,
-    C5: MakeGameObject + 'static,
-    MGO5: SplitForMgo<C5>,
-    C6: MakeGameObject + 'static,
-    MGO6: SplitForMgo<C6>,
-> PlaceMgos<(C0, C1, C2, C3, C4, C5, C6), 7> for (MGO0, MGO1, MGO2, MGO3, MGO4, MGO5, MGO6)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.6.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
-
-impl<
-    C0: MakeGameObject + 'static,
-    MGO0: SplitForMgo<C0>,
-    C1: MakeGameObject + 'static,
-    MGO1: SplitForMgo<C1>,
-    C2: MakeGameObject + 'static,
-    MGO2: SplitForMgo<C2>,
-    C3: MakeGameObject + 'static,
-    MGO3: SplitForMgo<C3>,
-    C4: MakeGameObject + 'static,
-    MGO4: SplitForMgo<C4>,
-    C5: MakeGameObject + 'static,
-    MGO5: SplitForMgo<C5>,
-    C6: MakeGameObject + 'static,
-    MGO6: SplitForMgo<C6>,
-    C7: MakeGameObject + 'static,
-    MGO7: SplitForMgo<C7>,
-> PlaceMgos<(C0, C1, C2, C3, C4, C5, C6, C7), 8>
-    for (MGO0, MGO1, MGO2, MGO3, MGO4, MGO5, MGO6, MGO7)
-{
-    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
-        let mut out = Vec::new();
-        let (c, pos, args) = self.0.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.1.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.2.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.3.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.4.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.5.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.6.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        let (c, pos, args) = self.7.split_for_mgo();
-        out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
-        out
-    }
-}
+impl_place_mgos!(2; (C0, MGO0, 0), (C1, MGO1, 1));
+impl_place_mgos!(3; (C0, MGO0, 0), (C1, MGO1, 1), (C2, MGO2, 2));
+impl_place_mgos!(
+    4;
+    (C0, MGO0, 0),
+    (C1, MGO1, 1),
+    (C2, MGO2, 2),
+    (C3, MGO3, 3)
+);
+impl_place_mgos!(
+    5;
+    (C0, MGO0, 0),
+    (C1, MGO1, 1),
+    (C2, MGO2, 2),
+    (C3, MGO3, 3),
+    (C4, MGO4, 4)
+);
+impl_place_mgos!(
+    6;
+    (C0, MGO0, 0),
+    (C1, MGO1, 1),
+    (C2, MGO2, 2),
+    (C3, MGO3, 3),
+    (C4, MGO4, 4),
+    (C5, MGO5, 5)
+);
+impl_place_mgos!(
+    7;
+    (C0, MGO0, 0),
+    (C1, MGO1, 1),
+    (C2, MGO2, 2),
+    (C3, MGO3, 3),
+    (C4, MGO4, 4),
+    (C5, MGO5, 5),
+    (C6, MGO6, 6)
+);
+impl_place_mgos!(
+    8;
+    (C0, MGO0, 0),
+    (C1, MGO1, 1),
+    (C2, MGO2, 2),
+    (C3, MGO3, 3),
+    (C4, MGO4, 4),
+    (C5, MGO5, 5),
+    (C6, MGO6, 6),
+    (C7, MGO7, 7)
+);

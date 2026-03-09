@@ -280,13 +280,13 @@ impl PinsState<'_> {
 }
 
 pub trait AsInteger<I> {
-    fn as_integer(self) -> I;
+    fn into_integer(self) -> I;
 }
 
 macro_rules! impl_as_integer {
     ($int:ty, $num:expr) => {
         impl AsInteger<$int> for [NetworkState; $num] {
-            fn as_integer(self) -> $int {
+            fn into_integer(self) -> $int {
                 self.into_iter().enumerate().fold(0, |acc, (index, value)| {
                     acc | (value.is_high() as $int) << index
                 })
@@ -398,38 +398,14 @@ pub enum Pin {
 }
 
 impl Pin {
-    fn inner_index(&self) -> usize {
-        match self {
-            Self::Top(u) | Self::Right(u) | Self::Bottom(u) | Self::Left(u) => *u,
-        }
-    }
-
-    // TODO: `as_layout_index` is redundant now, so remove and rewrite as_pinid_index
-
     /// As an index into a flat PinId Vec/slice, usually on `ChipInstance`.
     fn as_pinid_index(&self, size: UVec2) -> usize {
-        let (outer, inner) = self.as_layout_index();
-        let offset = match outer {
-            0 => 0,                                     // right
-            1 => size.x as usize,                       // bottom
-            2 => size.x as usize + size.y as usize,     // left
-            3 => size.x as usize + size.y as usize * 2, // top
-            _ => unreachable!(),
-        };
-
-        offset + inner
-    }
-
-    fn as_layout_index(&self) -> (usize, usize) {
-        let inner = self.inner_index();
-        let outer = match self {
-            Self::Right(_) => 0,
-            Self::Bottom(_) => 1,
-            Self::Left(_) => 2,
-            Self::Top(_) => 3,
-        };
-
-        (outer, inner)
+        match self {
+            Self::Right(inner) => *inner,
+            Self::Bottom(inner) => size.x as usize + *inner,
+            Self::Left(inner) => size.x as usize + size.y as usize + *inner,
+            Self::Top(inner) => size.x as usize + size.y as usize * 2 + *inner,
+        }
     }
 
     pub fn from_index(index: usize, size: UVec2) -> Self {
@@ -648,7 +624,7 @@ impl NetworkPins {
     fn reprocess_graph(&mut self) -> Option<GraphMutationResult> {
         let mut graphs = find_isolated_subgraphs(&self.connections);
         // we sort reverse by size and skip one as we want to be the largest new graph.
-        graphs.sort_by(|l, r| r.len().cmp(&l.len()));
+        graphs.sort_by_key(|r| std::cmp::Reverse(r.len()));
 
         if graphs[0].len() <= 1 {
             // this is the largest networks, and even it is too small to exist now.

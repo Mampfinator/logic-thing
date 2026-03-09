@@ -269,7 +269,7 @@ impl Game {
         self.game_objects
             .render(&self.simulation, self.resources.as_typemap());
         self.game_objects
-            .render_placement_overlays(&self.simulation, &self.resources.as_typemap());
+            .render_placement_overlays(&self.simulation, self.resources.as_typemap());
     }
 }
 
@@ -557,8 +557,10 @@ impl Resource for Camera {
 
 impl Default for Camera {
     fn default() -> Self {
-        let mut camera = Camera2D::default();
-        camera.target = vec2(screen_width() / 2., screen_height() / 2.);
+        let camera = Camera2D {
+            target: vec2(screen_width() / 2., screen_height() / 2.),
+            ..Default::default()
+        };
 
         Self {
             camera,
