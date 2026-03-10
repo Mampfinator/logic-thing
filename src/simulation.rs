@@ -103,16 +103,28 @@ pub struct ChipInstance {
 
 impl ChipInstance {
     pub fn get_pin_range(&self, pin_id: PinId, range: usize) -> Option<Vec<PinId>> {
-        let pin = self.get_pin(pin_id)?;
-        let last = pin.offset_by(range as isize)?;
-        if self.get_pinid(last).is_none() {
+        let index = self.pins.iter().position(|p| *p == Some(pin_id))?;
+
+        let x = self.size.x as usize;
+        let y = self.size.y as usize;
+
+        let (side_start, side_len, offset) = if index < x {
+            (0, x, index)
+        } else if index < x + y {
+            (x, y, index - x)
+        } else if index < x + y + x {
+            (x + y, x, index - (x + y))
+        } else {
+            (x * 2 + y, y, index - (x + y + x))
+        };
+
+        if offset + range > side_len {
             return None;
         }
 
         let mut out = Vec::with_capacity(range);
-        for pin in pin.range(range) {
-            let pinid = self.get_pinid(pin)?;
-            out.push(pinid);
+        for pin in &self.pins[side_start + offset..side_start + offset + range] {
+            out.push((*pin)?);
         }
 
         Some(out)
@@ -488,10 +500,7 @@ impl Pin {
         match self {
             Self::Top(idx) => vec2(*idx as f32 * TILE_SIZE + offset, 0.),
             Self::Right(idx) => vec2(size.x as f32 * TILE_SIZE, *idx as f32 * TILE_SIZE + offset),
-            Self::Bottom(idx) => vec2(
-                *idx as f32 * TILE_SIZE + offset,
-                size.y as f32 * TILE_SIZE,
-            ),
+            Self::Bottom(idx) => vec2(*idx as f32 * TILE_SIZE + offset, size.y as f32 * TILE_SIZE),
             Self::Left(idx) => vec2(0., *idx as f32 * TILE_SIZE + offset),
         }
     }
