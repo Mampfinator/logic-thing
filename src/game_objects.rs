@@ -63,6 +63,18 @@ impl TypeMap {
             .and_then(|any| any.downcast_mut())
     }
 
+    pub fn scoped<T: 'static, F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut T, &mut Self),
+    {
+        let Some(mut value) = self.delete::<T>() else {
+            return;
+        };
+
+        f(&mut value, self);
+        self.insert(value);
+    }
+
     pub fn get_mut_or_insert_default<T: Default + 'static>(&mut self) -> &mut T {
         if !self.resources.contains_key(&TypeId::of::<T>()) {
             self.insert_default::<T>();
@@ -328,6 +340,10 @@ pub struct ObjectContextMut<'a, 'b> {
 }
 
 impl<'a, 'b> ObjectContextMut<'a, 'b> {
+    pub fn id(&self) -> ObjectId {
+        self.id
+    }
+
     pub fn new(
         state: &'a mut GameObjectState,
         id: ObjectId,
@@ -924,6 +940,24 @@ impl GameObjects {
             .map(|(object, state)| (object.id, &*object.object, state))
     }
 
+    pub fn get_overlapping_by_type<T: GameObject + Hash>(
+        &self,
+        shape: Shape,
+    ) -> impl Iterator<Item = ObjectId> {
+        let type_id = TypeId::of::<T>();
+        self.objects
+            .iter()
+            .zip(self.state.iter())
+            .filter(move |(object, state)| {
+                object.identifier.0 == type_id
+                    && state
+                        .shape
+                        .map(|object_shape| object_shape.overlaps(&shape))
+                        .unwrap_or(false)
+            })
+            .map(|(object, _)| object.id)
+    }
+
     /// Moves an object by `offset`. Also propagates the movement to all its children.
     fn move_by(&mut self, object: ObjectId, offset: Vec2) {
         self.state.get_mut(object.0).unwrap().position += offset;
@@ -944,12 +978,18 @@ impl GameObjects {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Shape {
     Rectangle(Rect),
     Circle(Circle),
 }
 
 impl Shape {
+    pub fn rect_corners(top_left: Vec2, bottom_right: Vec2) -> Self {
+        let dim = bottom_right - top_left;
+        Self::Rectangle(Rect::new(top_left.x, top_left.y, dim.x, dim.y))
+    }
+
     pub fn contains(&self, point: Vec2) -> bool {
         match self {
             Self::Rectangle(rect) => rect.contains(point),
@@ -967,6 +1007,15 @@ impl Shape {
             }
         }
     }
+
+    pub fn overlaps(&self, other: &Shape) -> bool {
+        match (*self, *other) {
+            (Self::Rectangle(a), Self::Rectangle(b)) => a.overlaps(&b),
+            (Self::Rectangle(rect), Self::Circle(circle))
+            | (Self::Circle(circle), Self::Rectangle(rect)) => circle.overlaps_rect(&rect),
+            (Self::Circle(a), Self::Circle(b)) => a.overlaps(&b),
+        }
+    }
 }
 
 pub struct GameObjectState {
@@ -976,6 +1025,7 @@ pub struct GameObjectState {
     pub custom_data: TypeMap,
 }
 
+// TODO: destroy hook.
 pub trait GameObject: 'static {
     #[allow(unused)]
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {}

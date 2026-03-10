@@ -94,13 +94,35 @@ pub trait Chip {
 
 pub struct ChipInstance {
     chip: Box<dyn Chip>,
-    /// Pins are stored clockwise, from Right(0) to Top(size.x).
+    /// Pins are stored in reading order: top edge left->right, right edge top->bottom,
+    /// bottom edge left->right, left edge top->bottom.
     pub pins: Vec<Option<PinId>>,
     pub size: UVec2,
     pub id: ChipId,
 }
 
 impl ChipInstance {
+    pub fn get_pin_range(&self, pin_id: PinId, range: usize) -> Option<Vec<PinId>> {
+        let pin = self.get_pin(pin_id)?;
+        let last = pin.offset_by(range as isize)?;
+        if self.get_pinid(last).is_none() {
+            return None;
+        }
+
+        let mut out = Vec::with_capacity(range);
+        for pin in pin.range(range) {
+            let pinid = self.get_pinid(pin)?;
+            out.push(pinid);
+        }
+
+        Some(out)
+    }
+
+    pub fn get_pin(&self, pin_id: PinId) -> Option<Pin> {
+        self.pins_as_positions()
+            .find_map(|(pos, pin)| if pin == pin_id { Some(pos) } else { None })
+    }
+
     pub fn pins_as_positions(&self) -> impl Iterator<Item = (Pin, PinId)> {
         self.pins
             .iter()
@@ -387,9 +409,9 @@ impl PinLayout {
     }
 }
 
-/// Describes the location of a pin on the edge of a chip. Pins are counted left to right, top to bottom, and cannot be on corners.
-/// So Pin::Top(0) is leftmost pin on the top side of the chip.
-#[derive(Clone, Copy, Debug)]
+/// Describes the location of a pin on the edge of a chip. Pins are counted left to right, top to bottom. Corners are
+/// excluded. So Pin::Top(0) is the leftmost pin on the top side of the chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pin {
     Top(usize),
     Right(usize),
@@ -401,11 +423,32 @@ impl Pin {
     /// As an index into a flat PinId Vec/slice, usually on `ChipInstance`.
     fn as_pinid_index(&self, size: UVec2) -> usize {
         match self {
-            Self::Right(inner) => *inner,
-            Self::Bottom(inner) => size.x as usize + *inner,
-            Self::Left(inner) => size.x as usize + size.y as usize + *inner,
-            Self::Top(inner) => size.x as usize + size.y as usize * 2 + *inner,
+            Self::Top(inner) => *inner,
+            Self::Right(inner) => size.x as usize + *inner,
+            Self::Bottom(inner) => size.x as usize + size.y as usize + *inner,
+            Self::Left(inner) => size.x as usize * 2 + size.y as usize + *inner,
         }
+    }
+
+    pub fn offset_by(&self, offset: isize) -> Option<Pin> {
+        match self {
+            Self::Right(i) => usize::try_from(*i as isize + offset)
+                .map(|inner| Self::Right(inner))
+                .ok(),
+            Self::Bottom(i) => usize::try_from(*i as isize + offset)
+                .map(|inner| Self::Bottom(inner))
+                .ok(),
+            Self::Left(i) => usize::try_from(*i as isize + offset)
+                .map(|inner| Self::Left(inner))
+                .ok(),
+            Self::Top(i) => usize::try_from(*i as isize + offset)
+                .map(|inner| Self::Top(inner))
+                .ok(),
+        }
+    }
+
+    pub fn range(&self, length: usize) -> impl Iterator<Item = Self> {
+        (0..length).map(|i| self.offset_by(i as isize).unwrap())
     }
 
     pub fn from_index(index: usize, size: UVec2) -> Self {
@@ -414,10 +457,10 @@ impl Pin {
         let mut side = 0;
 
         for (side_index, segment_size) in [
+            size.x as usize, // top
             size.y as usize, // right
             size.x as usize, // bottom
             size.y as usize, // left
-            size.x as usize, // top
         ]
         .into_iter()
         .enumerate()
@@ -431,10 +474,10 @@ impl Pin {
         }
 
         match side {
-            0 => Self::Right(offset),
-            1 => Self::Bottom(size.x as usize - offset),
-            2 => Self::Left(size.y as usize - offset),
-            3 => Self::Top(offset),
+            0 => Self::Top(offset),
+            1 => Self::Right(offset),
+            2 => Self::Bottom(offset),
+            3 => Self::Left(offset),
             _ => unreachable!(),
         }
     }
@@ -446,10 +489,10 @@ impl Pin {
             Self::Top(idx) => vec2(*idx as f32 * TILE_SIZE + offset, 0.),
             Self::Right(idx) => vec2(size.x as f32 * TILE_SIZE, *idx as f32 * TILE_SIZE + offset),
             Self::Bottom(idx) => vec2(
-                (size.x as usize - *idx) as f32 * TILE_SIZE + offset,
+                *idx as f32 * TILE_SIZE + offset,
                 size.y as f32 * TILE_SIZE,
             ),
-            Self::Left(idx) => vec2(0., (size.y as usize - *idx) as f32 * TILE_SIZE + offset),
+            Self::Left(idx) => vec2(0., *idx as f32 * TILE_SIZE + offset),
         }
     }
 }
@@ -1022,11 +1065,64 @@ impl<T: Into<ChipId>> GetPinId for (&str, T) {
 
 #[cfg(test)]
 mod tests {
+    use macroquad::math::uvec2;
     use petgraph::prelude::StableUnGraph;
 
-    use crate::Nand;
+    use crate::{
+        Nand,
+        simulation::{Chip, PinDef, PinId, PinLayout},
+    };
 
     use super::{NetworkId, Pin, Simulation, find_isolated_subgraphs};
+
+    #[test]
+    fn test_pin_indexing() {
+        struct On8x8;
+
+        fn from_side_index(side: usize, index: usize) -> Pin {
+            match side {
+                0 => Pin::Top(index),
+                1 => Pin::Right(index),
+                2 => Pin::Bottom(index),
+                3 => Pin::Left(index),
+                _ => unreachable!(),
+            }
+        }
+
+        impl Chip for On8x8 {
+            fn setup(&self) -> super::PinLayout {
+                PinLayout::new_with(
+                    uvec2(8, 8),
+                    (0..4).zip(0..8).map(|(side, index)| {
+                        (
+                            from_side_index(side, index),
+                            PinDef::new_with_state("ON", true),
+                        )
+                    }),
+                )
+            }
+
+            fn update(&mut self, _: &mut super::PinsState) {}
+        }
+
+        let mut simulation = Simulation::default();
+        let pinid = simulation.place_chip(On8x8);
+
+        let instance = simulation.chips.get(pinid).unwrap();
+
+        for (index, pin) in (0..4)
+            .zip(0..8)
+            .map(|(a, b)| from_side_index(a, b))
+            .enumerate()
+        {
+            let pin_side = instance.get_pin(PinId(index)).unwrap();
+
+            let pinid = instance.get_pinid(pin).unwrap();
+            assert_eq!(pinid.0, index);
+
+            assert_eq!(pin, pin_side, "For PinId: {pinid:?}");
+        }
+    }
 
     #[test]
     fn test_merging() {

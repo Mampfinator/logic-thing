@@ -38,10 +38,32 @@ struct Game {
     pub resources: Resources,
 }
 
+struct ResourceVTable {
+    pub update: fn(&mut TypeMap, &mut GameCommands),
+    pub render: fn(&mut TypeMap),
+}
+
+impl ResourceVTable {
+    pub fn of<T: Resource>() -> Self {
+        Self {
+            update: |types, commands| {
+                types.scoped(|value: &mut T, types| {
+                    value.update(types, commands);
+                })
+            },
+            render: |types| {
+                types.scoped(|value: &mut T, types| {
+                    value.render(types);
+                })
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Resources {
     resources: TypeMap,
-    update_thunks: HashMap<TypeId, fn(&mut TypeMap, &mut GameCommands)>,
+    vtables: HashMap<TypeId, ResourceVTable>,
 }
 
 trait GameCommand {
@@ -79,22 +101,28 @@ impl GameCommands {
 
 pub trait Resource: Any + 'static {
     #[allow(unused)]
-    fn update(&mut self, commands: &mut GameCommands) {}
+    fn update(&mut self, resources: &mut TypeMap, commands: &mut GameCommands) {}
+    #[allow(unused)]
+    fn render(&self, resources: &mut TypeMap) {}
 }
 
 impl Resources {
     pub fn update(&mut self, commands: &mut GameCommands) {
-        for update in self.update_thunks.values_mut() {
-            update(&mut self.resources, commands);
+        for table in self.vtables.values() {
+            (table.update)(&mut self.resources, commands);
+        }
+    }
+
+    pub fn render(&mut self) {
+        for table in self.vtables.values() {
+            (table.render)(&mut self.resources)
         }
     }
 
     pub fn insert<T: Resource>(&mut self, value: T) -> &mut Self {
         self.resources.insert(value);
-        self.update_thunks
-            .insert(TypeId::of::<T>(), |types, commands| {
-                types.get_mut::<T>().unwrap().update(commands)
-            });
+        self.vtables
+            .insert(TypeId::of::<T>(), ResourceVTable::of::<T>());
         self
     }
 
@@ -111,7 +139,7 @@ impl Resources {
     }
 
     pub fn get_mut_or_insert_default<T: Resource + Default>(&mut self) -> &mut T {
-        if !self.update_thunks.contains_key(&TypeId::of::<T>()) {
+        if !self.vtables.contains_key(&TypeId::of::<T>()) {
             self.insert(T::default());
         }
 
@@ -121,7 +149,7 @@ impl Resources {
     pub fn delete<T: Resource>(&mut self) -> Option<T> {
         let removed = self.resources.delete();
         if removed.is_some() {
-            self.update_thunks.remove(&TypeId::of::<T>());
+            self.vtables.remove(&TypeId::of::<T>());
         }
 
         removed
@@ -208,6 +236,8 @@ impl Game {
 
         let mut buffer = CommandBuffer::default();
 
+        let mut any_on_click_triggered = false;
+
         for (id, object, state) in self.game_objects.iter_mut() {
             let mut ctx = ObjectContextMut::new(state, id, &mut buffer, &mut self.resources);
             if ui_result.pointer_over_menu {
@@ -238,6 +268,7 @@ impl Game {
             }
 
             if is_inside && clicked {
+                any_on_click_triggered = true;
                 object.on_click(&mut ctx, &mut self.simulation);
             }
 
@@ -251,6 +282,30 @@ impl Game {
             &mut self.simulation,
             &mut self.resources,
         );
+
+        // special logic for multi-pin selection, since otherwise that'd just be duplicate click tracking work.
+        if clicked && !any_on_click_triggered {
+            self.resources.insert(DragSelectionStart(mouse_pos));
+        }
+
+        if released
+            && let Some(DragSelectionStart(start)) = self.resources.delete::<DragSelectionStart>()
+        {
+            let shape = Shape::rect_corners(start, mouse_pos);
+            let pin_ids = self.resources.get::<PinObjectIds>().unwrap();
+            let pins = self
+                .game_objects
+                .get_overlapping_by_type::<PinId>(shape)
+                .filter_map(|object| pin_ids.0.get(&object))
+                .copied()
+                .collect::<Vec<_>>();
+
+            if pins.len() > 0 {
+                self.resources.insert(Selection::MultiPins(pins));
+            } else {
+                self.resources.insert(Selection::None);
+            }
+        }
 
         for (id, object, state) in self.game_objects.iter_mut() {
             let mut ctx = ObjectContextMut::new(state, id, &mut buffer, &mut self.resources);
@@ -266,10 +321,34 @@ impl Game {
 
     pub fn render(&mut self) {
         set_camera(&self.camera().camera);
+        self.resources.render();
         self.game_objects
             .render(&self.simulation, self.resources.as_typemap());
         self.game_objects
             .render_placement_overlays(&self.simulation, self.resources.as_typemap());
+    }
+}
+
+#[derive(Default)]
+pub struct PinObjectIds(pub HashMap<ObjectId, PinId>);
+impl Resource for PinObjectIds {}
+
+struct DragSelectionStart(Vec2);
+impl Resource for DragSelectionStart {
+    fn render(&self, resources: &mut TypeMap) {
+        let camera = resources.get::<Camera>().unwrap();
+        let cur_pos = camera.get_mouse_world_pos();
+        let dim = cur_pos - self.0;
+
+        draw_rectangle(self.0.x, self.0.y, dim.x, dim.y, DARKBLUE.with_alpha(0.2));
+        draw_rectangle_lines(
+            self.0.x,
+            self.0.y,
+            dim.x,
+            dim.y,
+            2.,
+            DARKBLUE.with_alpha(0.5),
+        );
     }
 }
 
@@ -290,12 +369,15 @@ impl_mgo!(
 );
 
 impl GameObject for PinId {
-    fn start(&mut self, state: &mut ObjectContextMut, simulation: &Simulation) {
-        state.set_layer(2);
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
+        let id = ctx.id();
+        ctx.resource_mut::<PinObjectIds>().0.insert(id, *self);
 
-        state.set_shape(Shape::Circle(Circle {
-            x: state.position().x,
-            y: state.position().y,
+        ctx.set_layer(2);
+
+        ctx.set_shape(Shape::Circle(Circle {
+            x: ctx.position().x,
+            y: ctx.position().y,
             r: TILE_SIZE / 4.,
         }));
 
@@ -319,15 +401,30 @@ impl GameObject for PinId {
             };
 
             // we can be *reasonably* sure that pin labels won't ever change. so this should be fine. probably.
-            state.insert_data(PinLabelMeta(label, text_offset, rotation));
+            ctx.insert_data(PinLabelMeta(label, text_offset, rotation));
         };
     }
 
     fn on_click(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
         let selection = ctx.resource_mut::<Selection>();
         if let Some(other) = selection.select_pin(*self) {
-            simulation.toggle_connect_by_pinid(other, *self);
-            selection.reset();
+            match other {
+                PinSelection::One(pin) => {
+                    simulation.toggle_connect_by_pinid(pin, *self);
+                    selection.reset();
+                }
+                PinSelection::Multiple(others) => {
+                    // TODO: preview
+                    if let Some(other_range) = get_multi_pin_range_other(others, simulation, *self)
+                    {
+                        for (a, b) in other_range.into_iter().zip(others.iter().copied()) {
+                            simulation.connect(a, b);
+                        }
+                    }
+
+                    selection.reset();
+                }
+            }
         }
     }
 
@@ -341,16 +438,16 @@ impl GameObject for PinId {
         ctx.resource_mut::<HoveredPins>().remove_one(*self);
     }
 
-    fn render(&self, state: &ObjectContext, simulation: &Simulation, _: &GameObjects) {
+    fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {
         let on_state = simulation.pins.get_state(*self).unwrap();
-        let position = state.position();
+        let position = ctx.position();
 
         let color = if on_state { RED } else { LIGHTGRAY };
 
         draw_circle(position.x, position.y, TILE_SIZE / 4., color);
         draw_circle_lines(position.x, position.y, TILE_SIZE / 4., 1., BLACK);
 
-        if let Some(meta) = state.get_data::<PinLabelMeta>() {
+        if let Some(meta) = ctx.get_data::<PinLabelMeta>() {
             let text_pos = position + meta.1;
             let rotation = meta.2;
 
@@ -365,6 +462,20 @@ impl GameObject for PinId {
                     ..Default::default()
                 },
             );
+        }
+
+        if ctx.hovered() {
+            let selection = ctx.resource::<Selection>();
+            if let Selection::MultiPins(others) = selection
+                && let Some(other_range) = get_multi_pin_range_other(others, simulation, *self)
+            {
+                for (a, b) in others.iter().copied().zip(other_range.into_iter()) {
+                    let pos_a = objects.find_state(&a).unwrap().position;
+                    let pos_b = objects.find_state(&b).unwrap().position;
+
+                    draw_line(pos_a.x, pos_a.y, pos_b.x, pos_b.y, 2., BLUE.with_alpha(0.7));
+                }
+            }
         }
     }
 }
@@ -508,7 +619,7 @@ pub struct Camera {
 }
 
 impl Resource for Camera {
-    fn update(&mut self, _: &mut GameCommands) {
+    fn update(&mut self, _: &mut TypeMap, _: &mut GameCommands) {
         if input::is_key_pressed(KeyCode::KpAdd) {
             self.zoom_by(0.1);
         } else if input::is_key_pressed(KeyCode::KpSubtract) {
@@ -584,16 +695,28 @@ impl Camera {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+fn get_multi_pin_range_other(
+    range: &[PinId],
+    simulation: &Simulation,
+    target_pin: PinId,
+) -> Option<Vec<PinId>> {
+    let pin = simulation.pins.get(target_pin).unwrap();
+    let chip = simulation.chips.get(pin.chip).unwrap();
+    chip.get_pin_range(target_pin, range.len())
+}
+
+// TODO: if a chip is fully enclosed in drag selection, select it instead of its pins. And add multi chip selection.
+#[derive(Default, Clone)]
 pub enum Selection {
     #[default]
     None,
     Pin(PinId),
     Chip(ChipId),
+    MultiPins(Vec<PinId>),
 }
 
 impl Resource for Selection {
-    fn update(&mut self, commands: &mut GameCommands) {
+    fn update(&mut self, _: &mut TypeMap, commands: &mut GameCommands) {
         if input::is_key_pressed(KeyCode::Delete)
             && let Selection::Chip(chip) = self
         {
@@ -603,14 +726,22 @@ impl Resource for Selection {
     }
 }
 
+#[derive(Debug)]
+pub enum PinSelection<'a> {
+    One(PinId),
+    Multiple(&'a [PinId]),
+}
+
 impl Selection {
     pub fn select_chip(&mut self, chip: ChipId) {
         *self = Selection::Chip(chip)
     }
 
-    pub fn select_pin(&mut self, pin: PinId) -> Option<PinId> {
+    pub fn select_pin(&mut self, pin: PinId) -> Option<PinSelection<'_>> {
         if let Self::Pin(other) = self {
-            Some(*other)
+            Some(PinSelection::One(*other))
+        } else if let Self::MultiPins(others) = self {
+            Some(PinSelection::Multiple(others))
         } else {
             *self = Selection::Pin(pin);
             None
@@ -701,10 +832,20 @@ struct PinLabelMeta(pub String, pub Vec2, pub f32);
 #[derive(Default)]
 struct ChipClickOffset(pub Vec2);
 
+#[derive(Default)]
+struct FullscreenState(bool);
+impl Resource for FullscreenState {
+    fn update(&mut self, _: &mut TypeMap, _: &mut GameCommands) {
+        if input::is_key_pressed(KeyCode::F) {
+            self.0 = !self.0;
+            set_fullscreen(self.0);
+        }
+    }
+}
+
 #[macroquad::main("Chip Game")]
 async fn main() {
     request_new_screen_size(1080., 720.);
-    //set_fullscreen(true);
 
     next_frame().await;
 
@@ -712,7 +853,9 @@ async fn main() {
 
     game.resources
         .insert_default::<Selection>()
-        .insert_default::<HoveredPins>();
+        .insert_default::<HoveredPins>()
+        .insert_default::<FullscreenState>()
+        .insert_default::<PinObjectIds>();
 
     game.game_objects.insert(
         Grid {
@@ -754,7 +897,7 @@ async fn main() {
         game.simulation
             .connect((display, Pin::Top(i)), (rom, Pin::Right(i + 1)));
         game.simulation
-            .connect((cpu, Pin::Right(i)), (rom, Pin::Right(i + 1)));
+            .connect((cpu, Pin::Right(i)), (rom, Pin::Left(i + 1)));
         game.simulation
             .connect((cpu, Pin::Left(i + 4)), (rom, Pin::Right(i + 1)));
     }
@@ -796,16 +939,18 @@ async fn main() {
         set_default_camera();
         if let Some(text) = match selection {
             Selection::Chip(id) => Some(format!("Chip selected: {id:?}")),
-            Selection::Pin(id) => {
-                let pin = game.simulation.pins.get(*id).unwrap();
-                Some(format!(
-                    "Pin selected: {}",
-                    pin.label
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or(format!("Pin {}", pin.id.0))
-                ))
-            }
+            Selection::Pin(id) => Some(format!(
+                "Pin selected: {}",
+                get_pin_label(&game.simulation, *id)
+            )),
+            Selection::MultiPins(pins) => Some(format!(
+                "Pins selected: {}",
+                pins.iter()
+                    .copied()
+                    .map(|pin| get_pin_label(&game.simulation, pin))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )),
             Selection::None => None,
         } {
             draw_text(&text, 0., 100., 32., WHITE);
@@ -817,6 +962,14 @@ async fn main() {
 
         next_frame().await;
     }
+}
+
+fn get_pin_label(simulation: &Simulation, pin_id: PinId) -> String {
+    let pin = simulation.pins.get(pin_id).unwrap();
+    pin.label
+        .as_ref()
+        .cloned()
+        .unwrap_or(format!("Pin {}", pin.id.0))
 }
 
 struct TieHigh;
