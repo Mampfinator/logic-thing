@@ -212,7 +212,11 @@ impl Hierarchy {
     pub fn remove_recursively(&mut self, parent: ObjectId) -> Option<Vec<ObjectId>> {
         self.get_children_indices(parent)?
             .into_iter()
-            .map(|index| self.graph.remove_node(index).unwrap())
+            .map(|index| {
+                let object = self.graph.remove_node(index).unwrap();
+                self.indices.remove(&object);
+                object
+            })
             .collect::<Vec<_>>()
             .into()
     }
@@ -587,6 +591,7 @@ impl GameObjects {
         let mut slot = self.objects.reserve();
 
         let id = ObjectId(slot.index);
+        self.hierarchy.insert_root(id);
 
         let mut hasher = DefaultHasher::default();
         object.hash(&mut hasher);
