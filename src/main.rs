@@ -2,6 +2,7 @@ use core::f32;
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
+    fs::read_to_string,
     hash::{Hash, Hasher},
 };
 
@@ -13,6 +14,7 @@ use crate::{
         CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
         ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap, spawn_make_object,
     },
+    loader::load_chips,
     simulation::{Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation},
 };
 
@@ -27,12 +29,13 @@ fn snap_to_grid(position: Vec2, spacing: f32) -> Vec2 {
 
 pub mod chips;
 pub mod game_objects;
+pub mod loader;
 pub mod simulation;
 
 use chips::cpu::{CPU, DATA_PINS};
 
-#[derive(Default)]
-struct Game {
+#[derive(Default, Debug)]
+pub struct Game {
     pub simulation: Simulation,
     pub game_objects: GameObjects,
     pub resources: Resources,
@@ -64,6 +67,12 @@ impl ResourceVTable {
 pub struct Resources {
     resources: TypeMap,
     vtables: HashMap<TypeId, ResourceVTable>,
+}
+
+impl std::fmt::Debug for Resources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Resources(#{})", self.vtables.len())
+    }
 }
 
 trait GameCommand {
@@ -868,39 +877,43 @@ async fn main() {
         &mut game.resources,
     );
 
-    let [cpu, high] = game.place_chips(((CPU::default(), ivec2(6, 6)), (TieHigh, ivec2(-2, 6))));
+    let script = read_to_string("example.rhai").unwrap();
 
-    game.simulation.connect((cpu, "CE"), (high, "HIGH"));
+    game = load_chips(game, script);
 
-    game.simulation
-        .connect((cpu, DATA_PINS[0]), (high, Pin::Right(0)));
+    // let [cpu, high] = game.place_chips(((CPU::default(), ivec2(6, 6)), (TieHigh, ivec2(-2, 6))));
 
-    let mut rom = [0; 256];
-    for i in 0..u8::MAX {
-        rom[i as usize] = i;
-    }
+    // game.simulation.connect((cpu, "CE"), (high, "HIGH"));
 
-    let [rom, high_2, clock_button] = game.place_chips((
-        (rom::ROM::from(rom), ivec2(31, 6)),
-        (TieHigh, ivec2(22, 5)),
-        (button::Button, ivec2(22, 6)),
-    ));
-    game.simulation.connect((cpu, "CLK"), (clock_button, "OUT"));
+    // game.simulation
+    //     .connect((cpu, DATA_PINS[0]), (high, Pin::Right(0)));
 
-    game.simulation.connect((high_2, "HIGH"), (rom, "CE"));
+    // let mut rom = [0; 256];
+    // for i in 0..u8::MAX {
+    //     rom[i as usize] = i;
+    // }
 
-    game.simulation.connect((clock_button, "CLK"), (rom, "CLK"));
+    // let [rom, high_2, clock_button] = game.place_chips((
+    //     (rom::ROM::from(rom), ivec2(31, 6)),
+    //     (TieHigh, ivec2(22, 5)),
+    //     (button::Button, ivec2(22, 6)),
+    // ));
+    // game.simulation.connect((cpu, "CLK"), (clock_button, "OUT"));
 
-    let [display] = game.place_chips((NumericDisplay, ivec2(44, 12)));
+    // game.simulation.connect((high_2, "HIGH"), (rom, "CE"));
 
-    for i in 0..8 {
-        game.simulation
-            .connect((display, Pin::Top(i)), (rom, Pin::Right(i + 1)));
-        game.simulation
-            .connect((cpu, Pin::Right(i)), (rom, Pin::Left(i + 1)));
-        game.simulation
-            .connect((cpu, Pin::Left(i + 4)), (rom, Pin::Right(i + 1)));
-    }
+    // game.simulation.connect((clock_button, "CLK"), (rom, "CLK"));
+
+    // let [display] = game.place_chips((NumericDisplay, ivec2(44, 12)));
+
+    // for i in 0..8 {
+    //     game.simulation
+    //         .connect((display, Pin::Top(i)), (rom, Pin::Right(i + 1)));
+    //     game.simulation
+    //         .connect((cpu, Pin::Right(i)), (rom, Pin::Left(i + 1)));
+    //     game.simulation
+    //         .connect((cpu, Pin::Left(i + 4)), (rom, Pin::Right(i + 1)));
+    // }
 
     for _ in 0.. {
         clear_background(SKYBLUE);

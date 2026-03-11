@@ -8,7 +8,7 @@ use petgraph::{graph::NodeIndex, prelude::StableUnGraph};
 
 use crate::TILE_SIZE;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Simulation {
     pub chips: Chips,
     pub pins: Pins,
@@ -58,7 +58,7 @@ impl Simulation {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Chips {
     chips: StableVec<ChipInstance>,
 }
@@ -99,6 +99,17 @@ pub struct ChipInstance {
     pub pins: Vec<Option<PinId>>,
     pub size: UVec2,
     pub id: ChipId,
+}
+
+impl std::fmt::Debug for ChipInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChipInstance")
+            .field("chip", &"Box<dyn Chip>")
+            .field("pins", &self.pins)
+            .field("size", &self.size)
+            .field("id", &self.id)
+            .finish()
+    }
 }
 
 impl ChipInstance {
@@ -153,6 +164,8 @@ pub struct ChipId(pub usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PinId(pub usize);
+
+#[derive(Debug)]
 pub struct PinMeta {
     pub chip: ChipId,
     pub label: Option<String>,
@@ -160,7 +173,7 @@ pub struct PinMeta {
     pub state: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Pins {
     pins: StableVec<PinMeta>,
 }
@@ -508,6 +521,7 @@ impl Pin {
 
 /// A vector where indices for elements remain stable across removals.
 /// Mind that this implementation does *not* guarantee that pointers to elements in the vector will remain stable, only the indices.
+#[derive(Clone, Debug)]
 pub struct StableVec<T> {
     buffer: Vec<Option<T>>,
 }
@@ -624,6 +638,7 @@ impl<T: Default> StableVec<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetworkId(pub usize);
 
+#[derive(Debug)]
 pub struct Network {
     pub pins: NetworkPins,
     pub state: bool,
@@ -631,7 +646,7 @@ pub struct Network {
     pub id: NetworkId,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct NetworkPins {
     pins: HashMap<PinId, NodeIndex<usize>>,
     connections: StableUnGraph<PinId, (), usize>,
@@ -827,7 +842,7 @@ impl Network {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Networks {
     networks: StableVec<Network>,
 }

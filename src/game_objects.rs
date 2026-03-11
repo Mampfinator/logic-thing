@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
+    fmt::Formatter,
     hash::{DefaultHasher, Hash, Hasher},
 };
 
@@ -30,6 +31,12 @@ pub use chip_catalog::{ChipTemplate, PlacementUiState, UiInputResult};
 #[derive(Default)]
 pub struct TypeMap {
     resources: HashMap<TypeId, Box<dyn Any>>,
+}
+
+impl std::fmt::Debug for TypeMap {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TypeMap(#{})", self.resources.len())
+    }
 }
 
 impl TypeMap {
@@ -83,7 +90,7 @@ impl TypeMap {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct DrawLayers {
     layers: HashMap<usize, HashSet<ObjectId>>,
 }
@@ -127,7 +134,7 @@ impl DrawLayers {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct GameObjects {
     objects: StableVec<GameObjectData>,
     state: StableVec<GameObjectState>,
@@ -135,7 +142,7 @@ pub struct GameObjects {
     draw_layers: DrawLayers,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Hierarchy {
     indices: HashMap<ObjectId, NodeIndex>,
     roots: HashSet<NodeIndex>,
@@ -312,6 +319,16 @@ struct GameObjectData {
     object: Box<dyn GameObject>,
     id: ObjectId,
     identifier: (TypeId, u64),
+}
+
+impl std::fmt::Debug for GameObjectData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GameObjectData")
+            .field("object", &"Box<dyn GameObject>")
+            .field("id", &self.id)
+            .field("identifier", &self.identifier)
+            .finish()
+    }
 }
 
 #[derive(Default)]
@@ -983,7 +1000,7 @@ impl GameObjects {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Shape {
     Rectangle(Rect),
     Circle(Circle),
@@ -1023,6 +1040,7 @@ impl Shape {
     }
 }
 
+#[derive(Debug)]
 pub struct GameObjectState {
     pub position: Vec2,
     pub shape: Option<Shape>,
