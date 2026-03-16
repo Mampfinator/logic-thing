@@ -8,7 +8,7 @@ use rhai::Engine;
 
 use crate::{
     Clock, Counter8b, Game, TieHigh,
-    chips::cpu::CPU,
+    chips::{cpu::CPU, rom::ROM},
     simulation::{ChipId, Pin},
 };
 
@@ -102,6 +102,13 @@ pub fn load_chips(game: Game, script: impl AsRef<str>) -> Game {
         "place_cpu",
         shadow! {[game] move |at: IVec2| {
             game.lock().unwrap().place_chips((CPU::default(), at))[0].0
+        }},
+    );
+
+    engine.register_fn(
+        "place_default_rom",
+        shadow! {[game] move |at: IVec2| {
+            game.lock().unwrap().place_chips((ROM::from([0; 256]), at))[0].0
         }},
     );
 

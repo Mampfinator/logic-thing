@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod chip_catalog;
+pub mod chip_inspector;
 use chip_catalog::{
     CHIP_CATALOG, hit_test_menu_item, hotkey_to_catalog_index, menu_hotkey_label,
     placement_menu_layout, placement_origin_from_cursor,
@@ -315,10 +316,17 @@ macro_rules! impl_mgo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectId(usize);
 
-struct GameObjectData {
+pub struct GameObjectData {
     object: Box<dyn GameObject>,
     id: ObjectId,
     identifier: (TypeId, u64),
+}
+
+impl GameObjectData {
+    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        let object: &mut dyn Any = &mut self.object;
+        object.downcast_mut()
+    }
 }
 
 impl std::fmt::Debug for GameObjectData {
@@ -400,6 +408,11 @@ impl<'a, 'b> ObjectContextMut<'a, 'b> {
 
     pub fn resource<T: Resource>(&self) -> &T {
         self.get_resource().unwrap()
+    }
+
+    pub fn insert_resource<T: Resource>(&mut self, resource: T) -> &mut Self {
+        self.resources.insert(resource);
+        self
     }
 
     pub fn data_mut<T: 'static>(&mut self) -> &mut T {
@@ -938,7 +951,7 @@ impl GameObjects {
         for (id, object, state) in self.draw_layers.iter_ordered().map(|id| {
             (
                 id,
-                &*self.objects.get(id.0).unwrap().object,
+                &self.objects.get(id.0).unwrap().object,
                 self.state.get(id.0).unwrap(),
             )
         }) {
@@ -952,14 +965,14 @@ impl GameObjects {
         self.objects
             .iter_mut()
             .zip(self.state.iter_mut())
-            .map(|(object, state)| (object.id, &mut *object.object, state))
+            .map(|(object, state)| (object.id, object.object.as_mut(), state))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ObjectId, &dyn GameObject, &GameObjectState)> {
         self.objects
             .iter()
             .zip(self.state.iter())
-            .map(|(object, state)| (object.id, &*object.object, state))
+            .map(|(object, state)| (object.id, object.object.as_ref(), state))
     }
 
     pub fn get_overlapping_by_type<T: GameObject + Hash>(
@@ -978,6 +991,11 @@ impl GameObjects {
                         .unwrap_or(false)
             })
             .map(|(object, _)| object.id)
+    }
+
+    /// USE AT OWN RISK.
+    pub fn get_mut(&mut self, object: ObjectId) -> Option<&mut GameObjectData> {
+        self.objects.get_mut(object.0)
     }
 
     /// Moves an object by `offset`. Also propagates the movement to all its children.
@@ -1049,7 +1067,7 @@ pub struct GameObjectState {
 }
 
 // TODO: destroy hook.
-pub trait GameObject: 'static {
+pub trait GameObject: Any {
     #[allow(unused)]
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {}
     fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects);
@@ -1189,6 +1207,24 @@ macro_rules! impl_place_mgos {
             }
         }
     };
+}
+
+#[doc(hidden)]
+pub struct MGOArray;
+
+impl<const N: usize, C, MGO> PlaceMgos<(MGOArray, C), N> for [MGO; N]
+where
+    C: MakeGameObject + 'static,
+    MGO: SplitForMgo<C>,
+{
+    fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)> {
+        let mut out = Vec::with_capacity(N);
+        for (c, pos, args) in self.into_iter().map(|e| e.split_for_mgo()) {
+            out.push(game.place_chip(c, pos.as_vec2() * TILE_SIZE, args));
+        }
+
+        out
+    }
 }
 
 impl_place_mgos!(2; (C0, MGO0, 0), (C1, MGO1, 1));

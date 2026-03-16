@@ -1,8 +1,11 @@
-use macroquad::math::uvec2;
+use macroquad::math::{uvec2, vec2};
+use macroquad::ui::{Ui, widgets::Editbox};
 
-use crate::impl_mgo;
+use crate::game_objects::chip_inspector::{OpenInspectorPanel, PanelData};
+use crate::game_objects::{GameObject, ObjectContextMut};
+use crate::{Selection, impl_mgo};
 
-use crate::simulation::{AsInteger, Chip, Pin, PinDef, PinLayout, PinsState};
+use crate::simulation::{AsInteger, Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation};
 
 const CE: Pin = Pin::Left(0);
 const CLK: Pin = Pin::Right(0);
@@ -33,7 +36,7 @@ pub struct ROM {
     content: [u8; 256],
 }
 
-impl_mgo!(ROM);
+impl_mgo!(ROM as ROMObj);
 
 impl From<[u8; 256]> for ROM {
     fn from(value: [u8; 256]) -> Self {
@@ -73,5 +76,125 @@ impl Chip for ROM {
             let value = self.content[address as usize];
             state.set_array(&DATA_PINS, value)
         }
+    }
+}
+
+#[derive(Hash)]
+pub struct ROMObj(ChipId);
+
+impl From<ChipId> for ROMObj {
+    fn from(value: ChipId) -> Self {
+        Self(value)
+    }
+}
+
+impl GameObject for ROMObj {
+    fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {
+        self.0.start(ctx, simulation);
+    }
+
+    fn on_click(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        if let Selection::Chip(id) = ctx.resource()
+            && *id == self.0
+        {
+            let chip = simulation
+                .chips
+                .get_mut(self.0)
+                .unwrap()
+                .downcast_mut::<ROM>()
+                .unwrap();
+
+            ctx.insert_resource(OpenInspectorPanel::new(
+                self.0,
+                ctx.id(),
+                PanelData::new(
+                    |ui, state| state.ui(ui),
+                    |state, _: &mut ROMObj, rom: &mut ROM| {
+                        rom.content = state.bytes;
+                    },
+                    ROMUi::new(self.0, &*chip),
+                ),
+            ));
+        }
+        self.0.on_click(ctx, simulation);
+    }
+
+    fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.update(ctx, simulation);
+    }
+
+    fn render(
+        &self,
+        ctx: &crate::game_objects::ObjectContext,
+        simulation: &Simulation,
+        objects: &crate::game_objects::GameObjects,
+    ) {
+        self.0.render(ctx, simulation, objects);
+    }
+
+    fn on_click_released(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_click_released(ctx, simulation);
+    }
+
+    fn on_mouse_enter(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_mouse_enter(ctx, simulation);
+    }
+
+    fn on_mouse_exit(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {
+        self.0.on_mouse_exit(ctx, simulation);
+    }
+}
+
+struct ROMUi {
+    chip_id: ChipId,
+    bytes: [u8; 256],
+    text: [[String; 16]; 16],
+}
+
+impl ROMUi {
+    pub fn ui(&mut self, ui: &mut Ui) {
+        let id = self.chip_id.0;
+        for (row_id, row) in self.text.iter_mut().enumerate() {
+            for (column_id, string) in row.iter_mut().enumerate() {
+                let last_len = string.len();
+                let edited = Editbox::new((id + row_id * 16 + column_id) as u64, vec2(20., 20.))
+                    .filter(&|char| char.is_ascii_hexdigit() && last_len <= 1)
+                    .position(vec2(column_id as f32 * 22., row_id as f32 * 22.))
+                    .ui(ui, string);
+
+                if edited && let Ok(byte) = u8::from_str_radix(string, 16) {
+                    self.bytes[row_id * 16 + column_id] = byte;
+                }
+            }
+        }
+    }
+}
+
+impl ROMUi {
+    pub fn new(chip_id: ChipId, rom: &ROM) -> Self {
+        Self {
+            chip_id,
+            bytes: rom.content.clone(),
+            text: (0..16)
+                .map(|x| {
+                    (0..16)
+                        .map(|y| {
+                            let index = x * 16 + y;
+                            format!("{:02x}", rom.content[index])
+                        })
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        }
+    }
+}
+
+impl ROM {
+    pub fn set(&mut self, offset: usize, byte: u8) {
+        self.content[offset] = byte;
     }
 }

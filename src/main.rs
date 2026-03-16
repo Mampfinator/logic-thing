@@ -9,7 +9,6 @@ use std::{
 use macroquad::{input, prelude::*};
 
 use crate::{
-    chips::{button, rom},
     game_objects::{
         CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
         ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap, spawn_make_object,
@@ -32,7 +31,7 @@ pub mod game_objects;
 pub mod loader;
 pub mod simulation;
 
-use chips::cpu::{CPU, DATA_PINS};
+use chips::cpu::CPU;
 
 #[derive(Default, Debug)]
 pub struct Game {
@@ -47,7 +46,7 @@ struct ResourceVTable {
 }
 
 impl ResourceVTable {
-    pub fn of<T: Resource>() -> Self {
+    pub const fn of<T: Resource>() -> Self {
         Self {
             update: |types, commands| {
                 types.scoped(|value: &mut T, types| {
@@ -112,7 +111,7 @@ pub trait Resource: Any + 'static {
     #[allow(unused)]
     fn update(&mut self, resources: &mut TypeMap, commands: &mut GameCommands) {}
     #[allow(unused)]
-    fn render(&self, resources: &mut TypeMap) {}
+    fn render(&mut self, resources: &mut TypeMap) {}
 }
 
 impl Resources {
@@ -193,6 +192,7 @@ impl Game {
     ///   (Led, ivec2(18, 6), RED),
     ///))
     /// ```
+    #[allow(private_bounds, reason = "PlaceMgos is just a collection trait.")]
     pub fn place_chips<const N: usize, Marker, T: PlaceMgos<Marker, N>>(
         &mut self,
         chips: T,
@@ -344,7 +344,7 @@ impl Resource for PinObjectIds {}
 
 struct DragSelectionStart(Vec2);
 impl Resource for DragSelectionStart {
-    fn render(&self, resources: &mut TypeMap) {
+    fn render(&mut self, resources: &mut TypeMap) {
         let camera = resources.get::<Camera>().unwrap();
         let cur_pos = camera.get_mouse_world_pos();
         let dim = cur_pos - self.0;
@@ -880,40 +880,6 @@ async fn main() {
     let script = read_to_string("example.rhai").unwrap();
 
     game = load_chips(game, script);
-
-    // let [cpu, high] = game.place_chips(((CPU::default(), ivec2(6, 6)), (TieHigh, ivec2(-2, 6))));
-
-    // game.simulation.connect((cpu, "CE"), (high, "HIGH"));
-
-    // game.simulation
-    //     .connect((cpu, DATA_PINS[0]), (high, Pin::Right(0)));
-
-    // let mut rom = [0; 256];
-    // for i in 0..u8::MAX {
-    //     rom[i as usize] = i;
-    // }
-
-    // let [rom, high_2, clock_button] = game.place_chips((
-    //     (rom::ROM::from(rom), ivec2(31, 6)),
-    //     (TieHigh, ivec2(22, 5)),
-    //     (button::Button, ivec2(22, 6)),
-    // ));
-    // game.simulation.connect((cpu, "CLK"), (clock_button, "OUT"));
-
-    // game.simulation.connect((high_2, "HIGH"), (rom, "CE"));
-
-    // game.simulation.connect((clock_button, "CLK"), (rom, "CLK"));
-
-    // let [display] = game.place_chips((NumericDisplay, ivec2(44, 12)));
-
-    // for i in 0..8 {
-    //     game.simulation
-    //         .connect((display, Pin::Top(i)), (rom, Pin::Right(i + 1)));
-    //     game.simulation
-    //         .connect((cpu, Pin::Right(i)), (rom, Pin::Left(i + 1)));
-    //     game.simulation
-    //         .connect((cpu, Pin::Left(i + 4)), (rom, Pin::Right(i + 1)));
-    // }
 
     for _ in 0.. {
         clear_background(SKYBLUE);

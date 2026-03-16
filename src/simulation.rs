@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cmp::Ordering,
     collections::{HashMap, HashSet},
 };
@@ -83,11 +84,15 @@ impl Chips {
     }
 
     pub fn get(&self, chip: ChipId) -> Option<&ChipInstance> {
-        self.chips.buffer.get(chip.0)?.as_ref()
+        self.chips.get(chip.0)
+    }
+
+    pub fn get_mut(&mut self, chip: ChipId) -> Option<&mut ChipInstance> {
+        self.chips.get_mut(chip.0)
     }
 }
 
-pub trait Chip {
+pub trait Chip: Any {
     fn setup(&self) -> PinLayout;
     fn update(&mut self, state: &mut PinsState);
 }
@@ -113,6 +118,11 @@ impl std::fmt::Debug for ChipInstance {
 }
 
 impl ChipInstance {
+    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        let chip: &mut dyn Any = self.chip.as_mut();
+        chip.downcast_mut()
+    }
+
     pub fn get_pin_range(&self, pin_id: PinId, range: usize) -> Option<Vec<PinId>> {
         let index = self.pins.iter().position(|p| *p == Some(pin_id))?;
 
