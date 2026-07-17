@@ -401,11 +401,13 @@ impl GameObject for PinId {
                 .unwrap();
             let pin_side = Pin::from_index(index, chip.size);
 
+            let text_length_offset = label.len() as f32 * 12.;
+
             let (text_offset, rotation) = match pin_side {
                 Pin::Right(_) => (vec2(TILE_SIZE / 2., 0.), 0.),
                 Pin::Bottom(_) => (vec2(0., TILE_SIZE / 2.), f32::consts::PI / 2.),
-                Pin::Left(_) => (vec2(-TILE_SIZE * 2.5, 0.), 0.),
-                Pin::Top(_) => (vec2(0., -TILE_SIZE * 2.5), f32::consts::PI / 2.),
+                Pin::Left(_) => (vec2(-TILE_SIZE / 2. - text_length_offset, 0.), 0.),
+                Pin::Top(_) => (vec2(0., -TILE_SIZE / 2. - text_length_offset), f32::consts::PI / 2.),
             };
 
             // we can be *reasonably* sure that pin labels won't ever change. so this should be fine. probably.
