@@ -1,6 +1,5 @@
 use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
+    any::{Any, TypeId}, collections::HashMap, time::Instant,
 };
 
 use macroquad::{
@@ -108,6 +107,76 @@ impl Resource for FullscreenState {
             self.0 = !self.0;
             set_fullscreen(self.0);
         }
+    }
+}
+
+enum SimulationState {
+    // Simulation speed scale
+    Running(f64),
+    Stopped,
+}
+
+impl Default for SimulationState {
+    fn default() -> Self {
+        Self::Running(1. / 60.)
+    }
+}
+
+pub struct OldSimulationSpeed(pub f64);
+impl Resource for OldSimulationSpeed {}
+
+#[derive(Default)]
+pub struct SimulationControl {
+    state: SimulationState,
+    last_tick: f64,
+}
+impl Resource for SimulationControl {}
+
+impl SimulationControl {
+    pub fn new(resolution: f64) -> Self {
+        let mut this = Self::default();
+        this.set_resolution(resolution);
+
+        this
+    }
+
+    pub fn set_resolution(&mut self, resolution: f64) {
+        assert!(resolution > 0.);
+        self.state = SimulationState::Running(resolution);
+    }
+
+    pub fn stop(&mut self) {
+        self.state = SimulationState::Stopped;
+    }
+
+    pub fn get_resolution(&self) -> Option<f64> {
+        match self.state {
+            SimulationState::Running(scale) => Some(scale),
+            SimulationState::Stopped => None 
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        match self.state {
+            SimulationState::Running(_) => false,
+            SimulationState::Stopped => true,
+        }
+    }
+
+    pub fn check(&mut self) -> bool {
+        match self.state {
+            SimulationState::Stopped => false,
+            SimulationState::Running(delay) => {
+                let current = macroquad::time::get_time();
+                if (current - self.last_tick) >= delay {
+                    self.last_tick = current;
+                    true
+                } else {
+                    false
+                }
+            }
+
+        } 
     }
 }
 

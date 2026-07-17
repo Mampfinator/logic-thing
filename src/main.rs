@@ -3,13 +3,10 @@ use std::fs::read_to_string;
 use macroquad::{input, prelude::*};
 
 use crate::{
-    chips::programmable::ProgrammableChip,
-    game::FullscreenState,
-    game_objects::{
+    chips::programmable::ProgrammableChip, game::{FullscreenState, OldSimulationSpeed, SimulationControl}, game_objects::{
         Grid,
         simulation_types::{HoveredPins, PinObjectIds, Selection, pin_label},
-    },
-    loader::load_chips,
+    }, loader::load_chips,
 };
 
 pub const TILE_SIZE: f32 = 16.0;
@@ -31,6 +28,7 @@ async fn main() {
 
     let mut game = Game::default();
     game.resources
+        .insert_default::<SimulationControl>()
         .insert_default::<Selection>()
         .insert_default::<HoveredPins>()
         .insert_default::<FullscreenState>()
@@ -53,9 +51,10 @@ async fn main() {
         ivec2(20, 20),
     ));
 
-    for frame in 0.. {
+    for _ in 0.. {
         clear_background(SKYBLUE);
-        if frame % 12 == 0 {
+        
+        if game.resources.get_mut::<SimulationControl>().unwrap().check() {
             game.simulation.tick();
         }
 
@@ -71,6 +70,30 @@ async fn main() {
         }
 
         game.update();
+
+        if input::is_key_down(KeyCode::LeftControl) && input::is_key_pressed(KeyCode::Space) {
+            let old_speed = game.resources.delete::<OldSimulationSpeed>();
+            let current_state = game.resources.get_mut::<SimulationControl>().unwrap();
+
+            match (current_state.get_resolution(), old_speed) {
+                // simulation is paused. We resume with old speed.
+                (None, Some(old_speed)) => {
+                    current_state.set_resolution(old_speed.0)
+                },
+                // simulation is paused but we don't have an old speed. Just go with the default one.
+                (None, None) => {
+                    current_state.set_resolution(1. / 60.);
+                },
+                (Some(current), _) => {
+                    current_state.stop();
+                    game.resources.insert(OldSimulationSpeed(current));
+                }
+            }
+        }
+
+        if input::is_key_pressed(KeyCode::Space) && game.resources.get::<SimulationControl>().unwrap().is_paused() {
+            game.simulation.tick();
+        }
 
         let selection = game.resources.get_mut::<Selection>().unwrap();
         if input::is_mouse_button_pressed(MouseButton::Right) {
