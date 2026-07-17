@@ -550,18 +550,10 @@ impl Pin {
 
     pub fn offset_by(&self, offset: isize) -> Option<Pin> {
         match self {
-            Self::Right(i) => usize::try_from(*i as isize + offset)
-                .map(Self::Right)
-                .ok(),
-            Self::Bottom(i) => usize::try_from(*i as isize + offset)
-                .map(Self::Bottom)
-                .ok(),
-            Self::Left(i) => usize::try_from(*i as isize + offset)
-                .map(Self::Left)
-                .ok(),
-            Self::Top(i) => usize::try_from(*i as isize + offset)
-                .map(Self::Top)
-                .ok(),
+            Self::Right(i) => usize::try_from(*i as isize + offset).map(Self::Right).ok(),
+            Self::Bottom(i) => usize::try_from(*i as isize + offset).map(Self::Bottom).ok(),
+            Self::Left(i) => usize::try_from(*i as isize + offset).map(Self::Left).ok(),
+            Self::Top(i) => usize::try_from(*i as isize + offset).map(Self::Top).ok(),
         }
     }
 
@@ -1029,18 +1021,11 @@ impl Networks {
     }
 
     fn merge(&mut self, network_a: NetworkId, network_b: NetworkId) {
-        
-        
-
         let (move_into, move_from) = match network_a.0.cmp(&network_b.0) {
             // trying to merge one network into itself is a noop.
             Ordering::Equal => return,
-            Ordering::Less => {
-                (network_a, network_b)
-            }
-            Ordering::Greater => {
-                (network_b, network_a)
-            }
+            Ordering::Less => (network_a, network_b),
+            Ordering::Greater => (network_b, network_a),
         };
 
         let move_from = self.networks.remove(move_from.0).unwrap();

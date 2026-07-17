@@ -1,8 +1,5 @@
-
 use macroquad::math::{UVec2, uvec2};
-use rhai::{
-    AST, Dynamic, Engine, EvalAltResult, Scope,
-};
+use rhai::{AST, Dynamic, Engine, EvalAltResult, Scope};
 
 use crate::{
     game_objects::{GameObject, GameObjects, ObjectContext, ObjectContextMut},

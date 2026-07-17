@@ -2,6 +2,7 @@ use core::f32;
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
+    fs::read_to_string,
     hash::{Hash, Hasher},
 };
 
@@ -13,6 +14,7 @@ use crate::{
         CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
         ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap, spawn_make_object,
     },
+    loader::load_chips,
     simulation::{Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation},
 };
 
@@ -407,7 +409,10 @@ impl GameObject for PinId {
                 Pin::Right(_) => (vec2(TILE_SIZE / 2., 0.), 0.),
                 Pin::Bottom(_) => (vec2(0., TILE_SIZE / 2.), f32::consts::PI / 2.),
                 Pin::Left(_) => (vec2(-TILE_SIZE / 2. - text_length_offset, 0.), 0.),
-                Pin::Top(_) => (vec2(0., -TILE_SIZE / 2. - text_length_offset), f32::consts::PI / 2.),
+                Pin::Top(_) => (
+                    vec2(0., -TILE_SIZE / 2. - text_length_offset),
+                    f32::consts::PI / 2.,
+                ),
             };
 
             // we can be *reasonably* sure that pin labels won't ever change. so this should be fine. probably.
@@ -878,22 +883,21 @@ async fn main() {
         &mut game.resources,
     );
 
-    //let script = read_to_string("example.rhai").unwrap();
+    let script = read_to_string("example.rhai").unwrap();
 
-    //game = load_chips(game, script);
+    game = load_chips(game, script);
 
-    game.place_chip(
+    game.place_chips((
         ProgrammableChip::from_code(include_str!("../chip-test.rhai")).unwrap(),
-        vec2(0., 0.),
-        (),
-    );
+        ivec2(20, 20),
+    ));
 
-    for _frame in 0.. {
+    for frame in 0.. {
         clear_background(SKYBLUE);
 
-        //if frame % 12 == 0 {
-        game.simulation.tick();
-        //}
+        if frame % 12 == 0 {
+            game.simulation.tick();
+        }
 
         // sync newly created networks, if any.
         for network in game.simulation.networks.ids().collect::<Vec<_>>() {
