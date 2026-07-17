@@ -1,6 +1,7 @@
 use macroquad::math::{uvec2, vec2};
 use macroquad::ui::{Ui, widgets::Editbox};
 
+use crate::chips::cpu::assembler::{compile_to_bytes, fill_to};
 use crate::game_objects::chip_inspector::{OpenInspectorPanel, PanelData};
 use crate::game_objects::{GameObject, ObjectContextMut};
 use crate::{Selection, impl_mgo};
@@ -151,6 +152,10 @@ struct ROMUi {
     text: [[String; 16]; 16],
 }
 
+const EXAMPLE: &str = "
+jmp 0
+";
+
 impl ROMUi {
     pub fn ui(&mut self, ui: &mut Ui) {
         let id = self.chip_id.0;
@@ -166,6 +171,10 @@ impl ROMUi {
                     self.bytes[row_id * 16 + column_id] = byte;
                 }
             }
+        }
+
+        if ui.button(vec2(400., 400.), "LOAD EXAMPLE") {
+            self.bytes = fill_to(&compile_to_bytes(EXAMPLE).unwrap()).unwrap()
         }
     }
 }
@@ -196,5 +205,9 @@ impl ROMUi {
 impl ROM {
     pub fn set(&mut self, offset: usize, byte: u8) {
         self.content[offset] = byte;
+    }
+
+    pub fn replace(&mut self, bytes: [u8; 256]) {
+        self.content = bytes;
     }
 }

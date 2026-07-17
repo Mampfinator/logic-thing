@@ -2,7 +2,7 @@ use macroquad::math::uvec2;
 
 use crate::simulation::{AsBits, Chip, Pin, PinDef, PinLayout, PinsState};
 
-mod assembler;
+pub mod assembler;
 
 /// Simple 8 bit CPU (with 8 bit addresses for now because I'm lazy.)
 #[derive(Default)]
