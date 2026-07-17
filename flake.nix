@@ -17,9 +17,21 @@
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = with pkgs; [
+            # Rust stuff
             clang
             llvmPackages.bintools
             rustup
+            
+            # mini-/macroquad dependencies
+            libX11
+            libX11.dev
+            xorgproto
+            libxkbcommon
+            libxi
+            libxrandr
+            libxcursor
+            libGL
+            alsa-lib
           ];
 
           RUSTC_VERSION = overrides.toolchain.channel;
