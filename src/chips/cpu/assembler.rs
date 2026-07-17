@@ -57,7 +57,7 @@ fn parse_dec_u16(input: &str) -> IResult<&str, u16> {
 fn parse_hex_u16(input: &str) -> IResult<&str, u16> {
     let (input, _) = tag("#")(input)?;
     map_res(
-        take_while_m_n(4, 4, |c: char| c.is_digit(16)),
+        take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit()),
         |input: &str| u16::from_str_radix(input, 16),
     )
     .parse(input)

@@ -2,18 +2,17 @@ use core::f32;
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
-    fs::read_to_string,
     hash::{Hash, Hasher},
 };
 
 use macroquad::{input, prelude::*};
 
 use crate::{
+    chips::programmable::ProgrammableChip,
     game_objects::{
         CommandBuffer, GameObject, GameObjects, GetState, Grid, MakeGameObject, ObjectContext,
         ObjectContextMut, ObjectId, PlaceMgos, Shape, TypeMap, spawn_make_object,
     },
-    loader::load_chips,
     simulation::{Chip, ChipId, NetworkId, Pin, PinDef, PinId, PinLayout, PinsState, Simulation},
 };
 
@@ -309,7 +308,7 @@ impl Game {
                 .copied()
                 .collect::<Vec<_>>();
 
-            if pins.len() > 0 {
+            if !pins.is_empty() {
                 self.resources.insert(Selection::MultiPins(pins));
             } else {
                 self.resources.insert(Selection::None);
@@ -478,7 +477,7 @@ impl GameObject for PinId {
             if let Selection::MultiPins(others) = selection
                 && let Some(other_range) = get_multi_pin_range_other(others, simulation, *self)
             {
-                for (a, b) in others.iter().copied().zip(other_range.into_iter()) {
+                for (a, b) in others.iter().copied().zip(other_range) {
                     let pos_a = objects.find_state(&a).unwrap().position;
                     let pos_b = objects.find_state(&b).unwrap().position;
 
@@ -877,14 +876,22 @@ async fn main() {
         &mut game.resources,
     );
 
-    let script = read_to_string("example.rhai").unwrap();
+    //let script = read_to_string("example.rhai").unwrap();
 
-    game = load_chips(game, script);
+    //game = load_chips(game, script);
 
-    for _ in 0.. {
+    game.place_chip(
+        ProgrammableChip::from_code(include_str!("../chip-test.rhai")).unwrap(),
+        vec2(0., 0.),
+        (),
+    );
+
+    for _frame in 0.. {
         clear_background(SKYBLUE);
 
+        //if frame % 12 == 0 {
         game.simulation.tick();
+        //}
 
         // sync newly created networks, if any.
         for network in game.simulation.networks.ids().collect::<Vec<_>>() {
@@ -954,7 +961,7 @@ fn get_pin_label(simulation: &Simulation, pin_id: PinId) -> String {
 struct TieHigh;
 
 impl Chip for TieHigh {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(
             uvec2(1, 1),
             [(Pin::Right(0), PinDef::new_with_state("HIGH", true))],
@@ -979,7 +986,7 @@ impl Clock {
 }
 
 impl Chip for Clock {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         // _______
         // |      |
         // |      |- CLKB
@@ -1030,7 +1037,7 @@ impl Nand {
 }
 
 impl Chip for Nand {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         let mut layout = PinLayout::new(2, self.gates * 2);
 
         for i in 0..self.gates {
@@ -1063,7 +1070,7 @@ struct Counter8b {
 }
 
 impl Chip for Counter8b {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(
             uvec2(2, 8),
             [
@@ -1100,7 +1107,7 @@ impl Chip for Counter8b {
 struct Led;
 
 impl Chip for Led {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(uvec2(1, 1), [(Pin::Left(0), PinDef::new("ON"))])
     }
 
@@ -1110,7 +1117,7 @@ impl Chip for Led {
 struct NumericDisplay;
 
 impl Chip for NumericDisplay {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(
             uvec2(8, 4),
             (0..8).map(|idx| (Pin::Top(idx), PinDef::new(format!("C{idx}")))),

@@ -53,7 +53,7 @@ impl PanelData {
             state: Box::new(value),
             render: Box::new(move |data: &mut dyn Any| {
                 let data = data.downcast_mut::<S>().unwrap();
-                (render)(&mut *root_ui(), data);
+                (render)(&mut root_ui(), data);
             }),
             apply: Box::new({
                 move |data, object, chip| {

@@ -51,7 +51,7 @@ const CLK: Pin = Pin::Left(2);
 const RW: Pin = Pin::Left(3);
 
 impl Chip for CPU {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(
             uvec2(4, 14),
             DATA_PINS

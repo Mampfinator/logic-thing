@@ -13,7 +13,7 @@ use crate::{
 pub struct Button;
 
 impl Chip for Button {
-    fn setup(&self) -> crate::simulation::PinLayout {
+    fn setup(&mut self) -> crate::simulation::PinLayout {
         PinLayout::new_with(uvec2(1, 1), [(Pin::Right(0), PinDef::new("OUT"))])
     }
 

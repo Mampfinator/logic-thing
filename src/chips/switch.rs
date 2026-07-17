@@ -25,7 +25,7 @@ impl Switches {
 }
 
 impl Chip for Switches {
-    fn setup(&self) -> crate::simulation::PinLayout {
+    fn setup(&mut self) -> crate::simulation::PinLayout {
         PinLayout::new_with(
             uvec2(4, self.switches as u32),
             (0..self.switches).map(|i| (Pin::Right(i), PinDef::new(format!("S{i}")))),

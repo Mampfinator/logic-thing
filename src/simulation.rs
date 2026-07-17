@@ -26,13 +26,14 @@ impl Simulation {
             let mut state = PinsState {
                 pin_ids: &chip.pins,
                 pin_size: chip.size,
-                states: &mut self.pins,
+                states: &self.pins,
                 networks: &self.networks,
-                mutations: Vec::new(),
+                mutations: MutationBuffer::default(),
             };
             chip.chip.update(&mut state);
 
-            state.apply();
+            let mutations = state.into_buffer();
+            mutations.apply(&mut self.pins)
         }
 
         self.networks.update(&self.pins);
@@ -65,7 +66,7 @@ pub struct Chips {
 }
 
 impl Chips {
-    pub fn register<T: Chip + 'static>(&mut self, pins: &mut Pins, chip: T) -> ChipId {
+    pub fn register<T: Chip + 'static>(&mut self, pins: &mut Pins, mut chip: T) -> ChipId {
         let mut slot = self.chips.reserve();
 
         let id = ChipId(slot.index);
@@ -93,7 +94,7 @@ impl Chips {
 }
 
 pub trait Chip: Any {
-    fn setup(&self) -> PinLayout;
+    fn setup(&mut self) -> PinLayout;
     fn update(&mut self, state: &mut PinsState);
 }
 
@@ -121,6 +122,11 @@ impl ChipInstance {
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
         let chip: &mut dyn Any = self.chip.as_mut();
         chip.downcast_mut()
+    }
+
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        let chip: &dyn Any = self.chip.as_ref();
+        chip.downcast_ref()
     }
 
     pub fn get_pin_range(&self, pin_id: PinId, range: usize) -> Option<Vec<PinId>> {
@@ -236,21 +242,50 @@ impl Pins {
     }
 }
 
-enum PinMutation {
+#[derive(Clone, Debug)]
+pub enum PinMutation {
     Toggle,
     Set(bool),
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MutationBuffer {
+    mutations: Vec<(PinId, PinMutation)>,
+}
+
+impl MutationBuffer {
+    pub fn apply(self, states: &mut Pins) {
+        for (pin, mutation) in self.mutations {
+            let pin = states.pins.get_mut(pin.0).unwrap();
+            let new_state = match mutation {
+                PinMutation::Toggle => !pin.state,
+                PinMutation::Set(state) => state,
+            };
+            pin.state = new_state;
+        }
+    }
+
+    pub fn mutate(mut self, mutation: (PinId, PinMutation)) -> Self {
+        self.mutations.push(mutation);
+        self
+    }
+
+    pub fn push(&mut self, target: PinId, mutation: PinMutation) {
+        self.mutations.push((target, mutation));
+    }
 }
 
 pub struct PinsState<'a> {
     /// Size of the pin layout (for figuring out which Pin location corresponds to which PinId)
     pin_size: UVec2,
     pin_ids: &'a [Option<PinId>],
-    states: &'a mut Pins,
+    states: &'a Pins,
     networks: &'a Networks,
     // mutations are buffered. not even sure we need that, but hey.
-    mutations: Vec<(PinId, PinMutation)>,
+    mutations: MutationBuffer,
 }
 
+// TODO: add support for [`GetPinId`] because this is a pain
 impl PinsState<'_> {
     // translates a PinLocation into a PinId for this state.
     pub fn get_pin_id(&self, location: Pin) -> Option<PinId> {
@@ -261,43 +296,36 @@ impl PinsState<'_> {
 
     pub fn try_toggle(&mut self, pin: Pin) -> Option<()> {
         let pin = self.get_pin_id(pin)?;
-        self.mutations.push((pin, PinMutation::Toggle));
+        self.mutations.push(pin, PinMutation::Toggle);
         Some(())
     }
 
     pub fn toggle(&mut self, pin: Pin) -> &mut Self {
         let pin = self.get_pin_id(pin).unwrap();
-        self.mutations.push((pin, PinMutation::Toggle));
+        self.mutations.push(pin, PinMutation::Toggle);
         self
     }
 
     pub fn on(&mut self, pin: Pin) -> &mut Self {
         let pin = self.get_pin_id(pin).unwrap();
-        self.mutations.push((pin, PinMutation::Set(true)));
+        self.mutations.push(pin, PinMutation::Set(true));
         self
     }
 
     pub fn off(&mut self, pin: Pin) -> &mut Self {
         let pin = self.get_pin_id(pin).unwrap();
-        self.mutations.push((pin, PinMutation::Set(false)));
+        self.mutations.push(pin, PinMutation::Set(false));
         self
     }
 
     pub fn set(&mut self, pin: Pin, state: bool) -> &mut Self {
         let pin = self.get_pin_id(pin).unwrap();
-        self.mutations.push((pin, PinMutation::Set(state)));
+        self.mutations.push(pin, PinMutation::Set(state));
         self
     }
 
-    fn apply(self) {
-        for (pin, mutation) in self.mutations {
-            let pin = self.states.pins.get_mut(pin.0).unwrap();
-            let new_state = match mutation {
-                PinMutation::Toggle => !pin.state,
-                PinMutation::Set(state) => state,
-            };
-            pin.state = new_state;
-        }
+    pub fn into_buffer(self) -> MutationBuffer {
+        self.mutations
     }
 
     /// Reads the current *output* of this pin. This is almost never what you need.
@@ -305,7 +333,11 @@ impl PinsState<'_> {
     /// If this is false, but [`Self::read_wire`] is true, that means some other pin connected to this one is high.
     pub fn read_output(&self, pin: Pin) -> Option<bool> {
         let id = self.get_pin_id(pin)?;
-        let state = self.states.pins.buffer.get(id.0)?.as_ref();
+        self.read_output_raw(id)
+    }
+
+    fn read_output_raw(&self, pin: PinId) -> Option<bool> {
+        let state = self.states.pins.buffer.get(pin.0)?.as_ref();
         state.map(|s| s.state)
     }
 
@@ -315,7 +347,13 @@ impl PinsState<'_> {
     /// If you need to check what a pin is set to, see [`Self::read_output`].
     pub fn read_wire(&self, pin: Pin) -> NetworkState {
         self.get_pin_id(pin)
-            .and_then(|pin| self.networks.get_network(pin))
+            .map(|pin| self.read_wire_raw(pin))
+            .unwrap_or_default()
+    }
+
+    fn read_wire_raw(&self, pin: PinId) -> NetworkState {
+        self.networks
+            .get_network(pin)
             .and_then(|network| self.networks.get_state(network))
             .unwrap_or_default()
     }
@@ -333,6 +371,51 @@ impl PinsState<'_> {
         for (state, pin) in value.as_bits().into_iter().zip(pins.iter().copied()) {
             self.set(pin, state);
         }
+    }
+
+    pub fn as_computed(&self) -> ComputedPinsState {
+        let mut states = HashMap::new();
+
+        for pin in self.pin_ids.iter().copied().flatten() {
+            let meta = self.states.get(pin).unwrap();
+            if let Some(label) = meta.label.as_ref() {
+                let state = self.read_output_raw(pin).unwrap_or(false);
+                let wire = self.read_wire_raw(pin);
+
+                states.insert(label.clone(), (pin, state, wire));
+            }
+        }
+
+        ComputedPinsState { pins: states }
+    }
+
+    pub fn replace_mutations(&mut self, mutations: MutationBuffer) {
+        self.mutations = mutations;
+    }
+}
+
+// Computed pins state for this current frame, used for passing into a chip's scripting context.
+#[derive(Clone)]
+pub struct ComputedPinsState {
+    pins: HashMap<String, (PinId, bool, NetworkState)>,
+}
+
+// This type needs self-receivers because everything in rhai gets cloned all the time. Yippie.
+impl ComputedPinsState {
+    pub fn read_output(self, pin: &str) -> Option<bool> {
+        self.pins.get(pin).map(|state| state.1)
+    }
+
+    pub fn read_wire(self, pin: &str) -> NetworkState {
+        self.pins.get(pin).map(|state| state.2).unwrap_or_default()
+    }
+
+    pub fn toggle(self, pin: &str) -> (PinId, PinMutation) {
+        (self.pins.get(pin).unwrap().0, PinMutation::Toggle)
+    }
+
+    pub fn set(self, pin: &str, value: bool) -> (PinId, PinMutation) {
+        (self.pins.get(pin).unwrap().0, PinMutation::Set(value))
     }
 }
 
@@ -407,7 +490,7 @@ impl PinDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PinLayout {
     size: UVec2,
     state: Vec<Option<PinDef>>,
@@ -468,16 +551,16 @@ impl Pin {
     pub fn offset_by(&self, offset: isize) -> Option<Pin> {
         match self {
             Self::Right(i) => usize::try_from(*i as isize + offset)
-                .map(|inner| Self::Right(inner))
+                .map(Self::Right)
                 .ok(),
             Self::Bottom(i) => usize::try_from(*i as isize + offset)
-                .map(|inner| Self::Bottom(inner))
+                .map(Self::Bottom)
                 .ok(),
             Self::Left(i) => usize::try_from(*i as isize + offset)
-                .map(|inner| Self::Left(inner))
+                .map(Self::Left)
                 .ok(),
             Self::Top(i) => usize::try_from(*i as isize + offset)
-                .map(|inner| Self::Top(inner))
+                .map(Self::Top)
                 .ok(),
         }
     }
@@ -946,21 +1029,19 @@ impl Networks {
     }
 
     fn merge(&mut self, network_a: NetworkId, network_b: NetworkId) {
-        let move_into;
-        let move_from;
+        
+        
 
-        match network_a.0.cmp(&network_b.0) {
+        let (move_into, move_from) = match network_a.0.cmp(&network_b.0) {
             // trying to merge one network into itself is a noop.
             Ordering::Equal => return,
             Ordering::Less => {
-                move_into = network_a;
-                move_from = network_b;
+                (network_a, network_b)
             }
             Ordering::Greater => {
-                move_into = network_b;
-                move_from = network_a;
+                (network_b, network_a)
             }
-        }
+        };
 
         let move_from = self.networks.remove(move_from.0).unwrap();
         let move_into = self.networks.get_mut(move_into.0).unwrap();
@@ -1124,7 +1205,7 @@ mod tests {
         }
 
         impl Chip for On8x8 {
-            fn setup(&self) -> super::PinLayout {
+            fn setup(&mut self) -> super::PinLayout {
                 PinLayout::new_with(
                     uvec2(8, 8),
                     (0..4).zip(0..8).map(|(side, index)| {

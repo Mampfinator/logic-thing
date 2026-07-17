@@ -46,7 +46,7 @@ impl From<[u8; 256]> for ROM {
 }
 
 impl Chip for ROM {
-    fn setup(&self) -> PinLayout {
+    fn setup(&mut self) -> PinLayout {
         PinLayout::new_with(
             uvec2(2, 9),
             DATA_PINS
@@ -183,7 +183,7 @@ impl ROMUi {
     pub fn new(chip_id: ChipId, rom: &ROM) -> Self {
         Self {
             chip_id,
-            bytes: rom.content.clone(),
+            bytes: rom.content,
             text: (0..16)
                 .map(|x| {
                     (0..16)
