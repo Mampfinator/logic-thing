@@ -17,12 +17,14 @@ use macroquad::{
 use petgraph::{Direction::Incoming, graph::NodeIndex, prelude::StableDiGraph};
 
 use crate::{
-    Camera, Game, Resource, Resources, TILE_SIZE,
+    Game, Resource, TILE_SIZE,
+    game::{Camera, Resources},
     simulation::{Chip, ChipId, Simulation, StableVec},
 };
 
 mod chip_catalog;
 pub mod chip_inspector;
+pub mod simulation_types;
 use chip_catalog::{
     CHIP_CATALOG, hit_test_menu_item, hotkey_to_catalog_index, menu_hotkey_label,
     placement_menu_layout, placement_origin_from_cursor,
@@ -234,6 +236,12 @@ pub trait MakeGameObject: Chip {
     type Args;
     type Obj: GameObject + Hash;
     fn make_game_object(id: ChipId, args: Self::Args) -> Self::Obj;
+}
+
+impl From<(ChipId, ObjectId)> for ChipId {
+    fn from(value: (ChipId, ObjectId)) -> Self {
+        value.0
+    }
 }
 
 pub(crate) fn spawn_make_object<C: MakeGameObject + 'static>(
@@ -1181,7 +1189,7 @@ impl_split_for_mgo!(A0, A1, A2, A3, A4, A5);
 impl_split_for_mgo!(A0, A1, A2, A3, A4, A5, A6);
 impl_split_for_mgo!(A0, A1, A2, A3, A4, A5, A6, A7);
 
-pub(super) trait PlaceMgos<T, const N: usize> {
+pub(crate) trait PlaceMgos<T, const N: usize> {
     fn place(self, game: &mut Game) -> Vec<(ChipId, ObjectId)>;
 }
 

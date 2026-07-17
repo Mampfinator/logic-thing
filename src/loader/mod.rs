@@ -7,8 +7,12 @@ use macroquad::{
 use rhai::Engine;
 
 use crate::{
-    Clock, Counter8b, Game, TieHigh,
-    chips::{cpu::CPU, rom::ROM},
+    chips::{
+        basic::{Clock, Counter8b, TieHigh},
+        cpu::CPU,
+        rom::ROM,
+    },
+    game::Game,
     simulation::{ChipId, Pin},
 };
 

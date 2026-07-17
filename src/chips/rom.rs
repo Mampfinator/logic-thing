@@ -4,7 +4,7 @@ use macroquad::ui::{Ui, widgets::Editbox};
 use crate::chips::cpu::assembler::{compile_to_bytes, fill_to};
 use crate::game_objects::chip_inspector::{OpenInspectorPanel, PanelData};
 use crate::game_objects::{GameObject, ObjectContextMut};
-use crate::{Selection, impl_mgo};
+use crate::{game_objects::simulation_types::Selection, impl_mgo};
 
 use crate::simulation::{AsInteger, Chip, ChipId, Pin, PinDef, PinLayout, PinsState, Simulation};
 

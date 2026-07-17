@@ -1169,7 +1169,7 @@ mod tests {
     use petgraph::prelude::StableUnGraph;
 
     use crate::{
-        Nand,
+        chips::basic::Nand,
         simulation::{Chip, PinDef, PinId, PinLayout},
     };
 

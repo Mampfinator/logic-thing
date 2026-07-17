@@ -5,8 +5,15 @@ use macroquad::{
 };
 
 use crate::{
-    Clock, Counter8b, Led, Nand, NumericDisplay, Resource, Resources, TILE_SIZE, TieHigh,
-    chips::{button, cpu::CPU, rom, switch::Switches},
+    Resource, TILE_SIZE,
+    chips::{
+        basic::{Clock, Counter8b, Led, Nand, NumericDisplay, TieHigh},
+        button,
+        cpu::CPU,
+        rom,
+        switch::Switches,
+    },
+    game::Resources,
     simulation::{Chip, ChipId, Simulation},
 };
 

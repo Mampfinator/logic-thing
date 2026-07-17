@@ -1,6 +1,9 @@
 use macroquad::math::uvec2;
 
-use crate::simulation::{AsBits, Chip, Pin, PinDef, PinLayout, PinsState};
+use crate::{
+    impl_mgo,
+    simulation::{AsBits, Chip, Pin, PinDef, PinLayout, PinsState},
+};
 
 pub mod assembler;
 
@@ -10,6 +13,8 @@ pub struct CPU {
     program_counter: u16,
     state: DecodeState,
 }
+
+impl_mgo!(CPU);
 
 pub const DATA_PINS: [Pin; 8] = [
     Pin::Left(4),
