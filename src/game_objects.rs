@@ -967,6 +967,18 @@ impl GameObjects {
         }
     }
 
+    pub fn ui(&self, simulation: &Simulation, resources: &TypeMap) {
+        for (id, object, state) in self.draw_layers.iter_ordered().map(|id| {
+            (
+                id,
+                &self.objects.get(id.0).unwrap().object,
+                self.state.get(id.0).unwrap(),
+            )
+        }) {
+            object.ui(&ObjectContext::new(state, id, resources), simulation, self)
+        }
+    }
+
     pub fn iter_mut(
         &mut self,
     ) -> impl Iterator<Item = (ObjectId, &mut dyn GameObject, &mut GameObjectState)> {
@@ -1079,6 +1091,10 @@ pub trait GameObject: Any {
     #[allow(unused)]
     fn start(&mut self, ctx: &mut ObjectContextMut, simulation: &Simulation) {}
     fn render(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects);
+
+    #[allow(unused)]
+    fn ui(&self, ctx: &ObjectContext, simulation: &Simulation, objects: &GameObjects) {}
+
     #[allow(unused)]
     fn update(&mut self, ctx: &mut ObjectContextMut, simulation: &mut Simulation) {}
 

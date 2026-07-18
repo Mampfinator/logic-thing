@@ -7,8 +7,21 @@ fn setup() {
     ])
 }
 
-fn update(state) {
-    if 1 == 1 {
-        mutations().mutate(state.toggle("T"))
+let PINS = ["T", "R", "B", "L"];
+
+fn update(pins, state) {
+    if !state.has("tick") {
+        state.set("tick", 0);
     }
+
+    state.set("tick", state.get("tick") + 1);
+
+    let tick = state.get("tick");
+
+    let activate_pin = PINS[tick % 4];
+    let deactivate_pin = PINS[(tick - 1) % 4];
+
+    mutations()
+        .mutate(pins.set(activate_pin, true))
+        .mutate(pins.set(deactivate_pin, false))
 }

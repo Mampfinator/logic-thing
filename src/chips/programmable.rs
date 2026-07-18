@@ -1,5 +1,7 @@
+use std::{collections::HashMap, rc::Rc};
+
 use macroquad::math::{UVec2, uvec2};
-use rhai::{AST, Dynamic, Engine, EvalAltResult, Scope};
+use rhai::{AST, Dynamic, Engine, EvalAltResult, Module, Scope, export_module, plugin::*};
 
 use crate::{
     game_objects::{GameObject, GameObjects, ObjectContext, ObjectContextMut},
@@ -10,18 +12,21 @@ use crate::{
     },
 };
 
-// TODO: add some sort of state to programmable chips. This can just be a hashmap on our end in the typestore that can be accessed during update.
+#[derive(Default)]
+pub struct ChipState(HashMap<String, Dynamic>);
 
 pub struct ProgrammableChip {
     engine: Engine,
     scope: Scope<'static>,
     ast: AST,
+    chip_state: ChipState,
 }
 
 impl ProgrammableChip {
     pub fn from_code(code: &str) -> Option<Self> {
         let mut engine = Engine::new();
         engine
+            .register_global_module(Rc::new(exported_module!(state_module)))
             .register_type::<UVec2>()
             .register_fn("uvec2", uvec2)
             .register_fn("uvec2", |x: i64, y: i64| uvec2(x as u32, y as u32))
@@ -67,7 +72,12 @@ impl ProgrammableChip {
 
         engine.run_ast_with_scope(&mut scope, &ast).unwrap();
 
-        Some(Self { engine, scope, ast })
+        Some(Self {
+            engine,
+            scope,
+            ast,
+            chip_state: Default::default(),
+        })
     }
 }
 
@@ -92,6 +102,36 @@ fn map_optional_function_result<T>(
     }
 }
 
+#[derive(Clone)]
+struct StateHandle(usize);
+impl StateHandle {
+    pub fn new(state: &mut ChipState) -> Self {
+        let ptr = unsafe { std::mem::transmute(state) };
+        Self(ptr)
+    }
+}
+
+impl AsMut<ChipState> for StateHandle {
+    fn as_mut(&mut self) -> &mut ChipState {
+        unsafe { &mut *std::ptr::with_exposed_provenance_mut(self.0) }
+    }
+}
+
+#[export_module]
+mod state_module {
+    pub fn set(_: NativeCallContext, state: &mut StateHandle, key: &str, value: Dynamic) {
+        state.as_mut().0.insert(key.to_owned(), value);
+    }
+
+    pub fn get(_: NativeCallContext, state: &mut StateHandle, key: &str) -> Dynamic {
+        state.as_mut().0.get(key).cloned().unwrap()
+    }
+
+    pub fn has(_: NativeCallContext, state: &mut StateHandle, key: &str) -> bool {
+        state.as_mut().0.contains_key(key)
+    }
+}
+
 impl Chip for ProgrammableChip {
     fn setup(&mut self) -> PinLayout {
         self.engine
@@ -99,20 +139,22 @@ impl Chip for ProgrammableChip {
             .unwrap()
     }
 
-    fn update(&mut self, state: &mut PinsState) {
+    fn update(&mut self, pins: &mut PinsState) {
+        let state_handle = StateHandle::new(&mut self.chip_state);
+
         match map_optional_function_result(
             self.engine.call_fn::<Dynamic>(
                 &mut self.scope,
                 &self.ast,
                 "update",
-                (state.as_computed(),),
+                (pins.as_computed(), state_handle),
             ),
             "update",
         ) {
             None => {}
             Some(Ok(inner)) => {
                 if let Some(mutations) = inner.try_cast::<MutationBuffer>() {
-                    state.replace_mutations(mutations);
+                    pins.replace_mutations(mutations);
                 }
             }
             Some(Err(e)) => {

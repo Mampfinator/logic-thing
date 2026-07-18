@@ -1,12 +1,15 @@
 use std::{
-    any::{Any, TypeId}, collections::HashMap, time::Instant,
+    any::{Any, TypeId},
+    collections::HashMap,
 };
 
 use macroquad::{
-    camera::{Camera2D, set_camera},
+    camera::{Camera2D, set_camera, set_default_camera},
+    color::WHITE,
     input::{self, KeyCode, MouseButton},
     math::{Vec2, vec2},
     prelude::{screen_height, screen_width, set_fullscreen},
+    text::draw_text,
 };
 
 use crate::{
@@ -33,10 +36,12 @@ pub struct Camera {
 
 impl Resource for Camera {
     fn update(&mut self, _: &mut TypeMap, _: &mut GameCommands) {
-        if input::is_key_pressed(KeyCode::KpAdd) {
-            self.zoom_by(0.1);
-        } else if input::is_key_pressed(KeyCode::KpSubtract) {
-            self.zoom_by(-0.1);
+        if !input::is_key_down(KeyCode::LeftControl) {
+            if input::is_key_pressed(KeyCode::KpAdd) {
+                self.zoom_by(0.1);
+            } else if input::is_key_pressed(KeyCode::KpSubtract) {
+                self.zoom_by(-0.1);
+            }
         }
 
         let (_, wheel_y) = input::mouse_wheel();
@@ -110,19 +115,33 @@ impl Resource for FullscreenState {
     }
 }
 
+#[derive(Debug)]
 enum SimulationState {
     // Simulation speed scale
-    Running(f64),
+    Running(usize),
     Stopped,
+}
+
+impl std::fmt::Display for SimulationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Running(speed) => {
+                write!(f, "{} TPS", speed)
+            }
+            Self::Stopped => {
+                write!(f, "Paused")
+            }
+        }
+    }
 }
 
 impl Default for SimulationState {
     fn default() -> Self {
-        Self::Running(1. / 60.)
+        Self::Running(60)
     }
 }
 
-pub struct OldSimulationSpeed(pub f64);
+pub struct OldSimulationSpeed(pub usize);
 impl Resource for OldSimulationSpeed {}
 
 #[derive(Default)]
@@ -130,29 +149,97 @@ pub struct SimulationControl {
     state: SimulationState,
     last_tick: f64,
 }
-impl Resource for SimulationControl {}
+impl Resource for SimulationControl {
+    fn update(&mut self, resources: &mut TypeMap, commands: &mut GameCommands) {
+        if input::is_key_down(KeyCode::LeftControl) && input::is_key_pressed(KeyCode::Space) {
+            let old_speed = resources.delete::<OldSimulationSpeed>();
+
+            match (self.get_speed(), old_speed) {
+                // simulation is paused. We resume with old speed.
+                (None, Some(old_speed)) => self.set_speed(old_speed.0),
+                // simulation is paused but we don't have an old speed. Just go with the default one.
+                (None, None) => {
+                    self.set_speed(60);
+                }
+                (Some(current), _) => {
+                    self.stop();
+                    resources.insert(OldSimulationSpeed(current));
+                }
+            }
+        }
+
+        if input::is_key_pressed(KeyCode::Space) && self.is_paused() {
+            commands.tick_simulation();
+        }
+
+        if input::is_key_down(KeyCode::LeftControl) {
+            let step = if input::is_key_down(KeyCode::LeftShift) {
+                10
+            } else {
+                1
+            };
+            if input::is_key_pressed(KeyCode::KpAdd) {
+                self.increase_by(step);
+            } else if input::is_key_pressed(KeyCode::KpSubtract) {
+                self.decrease_by(step);
+            }
+        }
+    }
+
+    fn ui(&mut self, _: &mut TypeMap) {
+        let text = format!("Simulation State: {}", self.state);
+        draw_text(&text, 0., 50., 24., WHITE);
+    }
+}
 
 impl SimulationControl {
-    pub fn new(resolution: f64) -> Self {
+    pub fn new(speed: usize) -> Self {
         let mut this = Self::default();
-        this.set_resolution(resolution);
+        this.set_speed(speed);
 
         this
     }
 
-    pub fn set_resolution(&mut self, resolution: f64) {
-        assert!(resolution > 0.);
-        self.state = SimulationState::Running(resolution);
+    pub fn increase_by(&mut self, step: usize) {
+        match self.state {
+            SimulationState::Stopped => {
+                self.state = SimulationState::Running(step);
+            }
+            SimulationState::Running(old_speed) => {
+                self.state = SimulationState::Running((old_speed + step).min(60));
+            }
+        }
+    }
+
+    pub fn decrease_by(&mut self, step: usize) {
+        match self.state {
+            SimulationState::Stopped => {
+                return;
+            }
+            SimulationState::Running(old_speed) => {
+                let new_speed = old_speed - step;
+                if new_speed <= 0 {
+                    self.state = SimulationState::Stopped;
+                } else {
+                    self.state = SimulationState::Running(new_speed);
+                }
+            }
+        }
+    }
+
+    pub fn set_speed(&mut self, speed: usize) {
+        assert!(speed > 0 && speed <= 60);
+        self.state = SimulationState::Running(speed);
     }
 
     pub fn stop(&mut self) {
         self.state = SimulationState::Stopped;
     }
 
-    pub fn get_resolution(&self) -> Option<f64> {
+    pub fn get_speed(&self) -> Option<usize> {
         match self.state {
             SimulationState::Running(scale) => Some(scale),
-            SimulationState::Stopped => None 
+            SimulationState::Stopped => None,
         }
     }
 
@@ -168,15 +255,14 @@ impl SimulationControl {
             SimulationState::Stopped => false,
             SimulationState::Running(delay) => {
                 let current = macroquad::time::get_time();
-                if (current - self.last_tick) >= delay {
+                if (current - self.last_tick) >= 1. / delay as f64 {
                     self.last_tick = current;
                     true
                 } else {
                     false
                 }
             }
-
-        } 
+        }
     }
 }
 
@@ -328,6 +414,12 @@ impl Game {
         );
     }
 
+    fn ui(&mut self) {
+        self.game_objects
+            .ui(&self.simulation, &self.resources.resources);
+        self.resources.ui();
+    }
+
     pub fn render(&mut self) {
         set_camera(&self.camera().camera);
         self.resources.render();
@@ -335,6 +427,9 @@ impl Game {
             .render(&self.simulation, self.resources.as_typemap());
         self.game_objects
             .render_placement_overlays(&self.simulation, self.resources.as_typemap());
+
+        set_default_camera();
+        self.ui();
     }
 }
 
@@ -343,6 +438,8 @@ pub trait Resource: Any + 'static {
     fn update(&mut self, resources: &mut TypeMap, commands: &mut GameCommands) {}
     #[allow(unused)]
     fn render(&mut self, resources: &mut TypeMap) {}
+    #[allow(unused)]
+    fn ui(&mut self, resources: &mut TypeMap) {}
 }
 
 impl Resources {
@@ -354,7 +451,13 @@ impl Resources {
 
     pub fn render(&mut self) {
         for table in self.vtables.values() {
-            (table.render)(&mut self.resources)
+            (table.render)(&mut self.resources);
+        }
+    }
+
+    pub fn ui(&mut self) {
+        for table in self.vtables.values() {
+            (table.ui)(&mut self.resources);
         }
     }
 
@@ -414,6 +517,7 @@ impl Resources {
 struct ResourceVTable {
     pub update: fn(&mut TypeMap, &mut GameCommands),
     pub render: fn(&mut TypeMap),
+    pub ui: fn(&mut TypeMap),
 }
 
 impl ResourceVTable {
@@ -427,6 +531,11 @@ impl ResourceVTable {
             render: |types| {
                 types.scoped(|value: &mut T, types| {
                     value.render(types);
+                })
+            },
+            ui: |types| {
+                types.scoped(|value: &mut T, types| {
+                    value.ui(types);
                 })
             },
         }
@@ -456,6 +565,13 @@ impl GameCommand for RemoveChip {
     }
 }
 
+pub struct TickSimulation;
+impl GameCommand for TickSimulation {
+    fn apply(&mut self, game: &mut Game) {
+        game.simulation.tick();
+    }
+}
+
 #[derive(Default)]
 struct GameCommandBuffer(Vec<Box<dyn GameCommand>>);
 impl GameCommandBuffer {
@@ -474,6 +590,11 @@ pub struct GameCommands {
 impl GameCommands {
     pub fn remove_chip(&mut self, chip: ChipId) -> &mut Self {
         self.buffer.0.push(Box::new(RemoveChip(chip)));
+        self
+    }
+
+    pub fn tick_simulation(&mut self) -> &mut Self {
+        self.buffer.0.push(Box::new(TickSimulation));
         self
     }
 }
